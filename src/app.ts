@@ -208,7 +208,11 @@ export async function buildApp(options: AppOptions = {}) {
   const provider: PaymentProvider =
     options.provider ??
     (env.PAYMENT_PROVIDER === 'mock'
-      ? new MockPaymentProvider({ secret: env.MOCK_PAYMENT_SECRET, appBaseUrl: env.APP_BASE_URL })
+      ? new MockPaymentProvider({
+          secret: env.MOCK_PAYMENT_SECRET,
+          appBaseUrl: env.APP_BASE_URL,
+          checkoutPath: env.INTEGRATION_MODE === 'staging' ? '/mock-payment' : '/dev/mock-payment',
+        })
       : new FreedomPayProvider({
           merchantId: env.FREEDOMPAY_MERCHANT_ID,
           secretKey: env.FREEDOMPAY_SECRET_KEY,
@@ -220,7 +224,7 @@ export async function buildApp(options: AppOptions = {}) {
         }));
   const sheets =
     options.sheets ??
-    (env.INTEGRATION_MODE === 'demo'
+    (!env.GOOGLE_SHEETS_ENABLED || env.INTEGRATION_MODE === 'demo'
       ? new DemoSheetsService(db)
       : new GoogleSheetsService({
           db,
@@ -232,7 +236,7 @@ export async function buildApp(options: AppOptions = {}) {
         }));
   const notifications =
     options.notifications ??
-    (env.INTEGRATION_MODE === 'live' && env.TELEGRAM_BOT_TOKEN
+    (env.TELEGRAM_ENABLED && env.INTEGRATION_MODE !== 'demo'
       ? new TelegramService({
           botToken: env.TELEGRAM_BOT_TOKEN,
           chatId: env.TELEGRAM_MANAGER_CHAT_ID,
@@ -259,6 +263,7 @@ export async function buildApp(options: AppOptions = {}) {
     productPrice: env.PRODUCT_PRICE_KZT,
     maxQuantity: env.MAX_ORDER_QUANTITY,
     processFirstMessageAfterLanguage: env.PROCESS_FIRST_MESSAGE_AFTER_LANGUAGE,
+    managerHandoffEnabled: env.MANAGER_HANDOFF_ENABLED,
   });
   const inbox = new WhatsAppService(
     db,
@@ -281,25 +286,31 @@ export async function buildApp(options: AppOptions = {}) {
     handoff,
     onError: (e) => app.log.error({ event: 'worker_error', error: errorCode(e) }),
   });
-  app.get('/health', async () => ({ status: 'ok' }));
-  app.get('/ready', async () => {
-    await db.$queryRaw`SELECT 1`;
-    return { status: 'ok' };
-  });
+  for (const path of ['/health', '/ready'])
+    app.get(path, async (_req, reply) => {
+      try {
+        await db.$queryRaw`SELECT 1`;
+        return { status: 'ok', database: 'connected' };
+      } catch {
+        return reply.status(503).send({ status: 'degraded', database: 'disconnected' });
+      }
+    });
   app.get('/webhooks/whatsapp', async (req, reply) => {
     const query = z
       .object({
-        'hub.mode': z.literal('subscribe'),
+        'hub.mode': z.string(),
         'hub.verify_token': z.string(),
         'hub.challenge': z.string().max(200),
       })
-      .parse(req.query);
+      .safeParse(req.query);
+    if (!query.success) return reply.status(400).send({ error: 'Invalid verification request' });
     if (
+      query.data['hub.mode'] !== 'subscribe' ||
       !env.WHATSAPP_VERIFY_TOKEN ||
-      !safeEqual(query['hub.verify_token'], env.WHATSAPP_VERIFY_TOKEN)
+      !safeEqual(query.data['hub.verify_token'], env.WHATSAPP_VERIFY_TOKEN)
     )
       return reply.status(403).send({ error: 'Forbidden' });
-    return reply.type('text/plain').send(query['hub.challenge']);
+    return reply.type('text/plain').send(query.data['hub.challenge']);
   });
   app.post('/webhooks/whatsapp', async (req, reply) => {
     const signature = req.headers['x-hub-signature-256'];
@@ -309,8 +320,10 @@ export async function buildApp(options: AppOptions = {}) {
         typeof signature === 'string' ? signature : undefined,
         env.WHATSAPP_APP_SECRET,
       )
-    )
+    ) {
+      req.log.warn({ event: 'whatsapp_signature_rejected', request_id: req.id });
       return reply.status(401).send({ error: 'Invalid signature' });
+    }
     const parsed = parseWebhook(req.body, env.WHATSAPP_PHONE_NUMBER_ID || undefined);
     await inbox.receive(parsed.messages, parsed.statuses);
     return { received: true };
@@ -355,6 +368,8 @@ export async function buildApp(options: AppOptions = {}) {
       ),
   );
   app.post('/webhooks/telegram', async (req, reply) => {
+    if (!env.TELEGRAM_ENABLED || !env.MANAGER_HANDOFF_ENABLED)
+      return reply.status(404).send({ error: 'Not configured' });
     const secret = req.headers['x-telegram-bot-api-secret-token'];
     if (
       !env.TELEGRAM_WEBHOOK_SECRET ||
@@ -364,6 +379,81 @@ export async function buildApp(options: AppOptions = {}) {
       return reply.status(401).send({ error: 'Unauthorized' });
     return handoff.handleUpdate(req.body, secret);
   });
+  // A capability for one mock attempt, separate from the local developer simulator.
+  // Never register this checkout in production, regardless of provider injection.
+  if (
+    env.NODE_ENV !== 'production' &&
+    env.INTEGRATION_MODE === 'staging' &&
+    provider instanceof MockPaymentProvider
+  ) {
+    const checkout = provider;
+    await app.register(async (mock) => {
+      mock.addHook('onRequest', async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        reply.header('Referrer-Policy', 'no-referrer');
+        const params = z.object({ id: z.string().uuid() }).safeParse(req.params);
+        const query = z.object({ expires: z.string(), token: z.string() }).safeParse(req.query);
+        if (
+          !params.success ||
+          !query.success ||
+          !checkout.validateCheckoutToken(params.data.id, query.data.expires, query.data.token)
+        )
+          return reply.status(403).send({ error: 'Invalid or expired test payment link' });
+        if (
+          req.method === 'POST' &&
+          req.headers.origin &&
+          req.headers.origin !== new URL(env.APP_BASE_URL).origin
+        )
+          return reply.status(403).send({ error: 'Cross-origin request rejected' });
+      });
+      const attemptFor = async (params: unknown) => {
+        const { id } = z.object({ id: z.string().uuid() }).parse(params);
+        const attempt = await db.paymentAttempt.findUnique({ where: { id } });
+        if (!attempt || attempt.provider !== 'mock' || !attempt.externalPaymentId)
+          throw Object.assign(new Error('Test payment not found'), { statusCode: 404 });
+        return attempt;
+      };
+      mock.get('/mock-payment/:id', async (req, reply) => {
+        const attempt = await attemptFor(req.params);
+        return reply
+          .type('text/html')
+          .send(
+            paymentPage(
+              'Тестовая оплата / Сынақ төлемі',
+              `${attempt.amount.toLocaleString('ru-RU')} ₸ · Это симуляция. Деньги не списываются. Ақша алынбайды.`,
+              `<form method="post"><button name="status" value="SUCCESS">Успешная оплата</button> <button name="status" value="FAILED">Отказ</button></form>`,
+            ),
+          );
+      });
+      mock.post('/mock-payment/:id', async (req, reply) => {
+        const attempt = await attemptFor(req.params);
+        const { status } = z.object({ status: z.enum(['SUCCESS', 'FAILED']) }).parse(req.body);
+        const event = await checkout.verifyWebhook(
+          checkout.buildSignedPayload({
+            externalPaymentId: attempt.externalPaymentId!,
+            merchantReference: attempt.merchantReference,
+            merchantId: attempt.merchantId,
+            orderId: attempt.orderId,
+            amount: attempt.amount,
+            currency: attempt.currency,
+            status: status === 'SUCCESS' ? 'PAID' : 'FAILED',
+          }),
+        );
+        const result = await payments.apply(event, req.id);
+        // The normal worker sends confirmation; the HTTP request never waits for Meta.
+        if (req.headers.accept?.includes('text/html'))
+          return reply
+            .type('text/html')
+            .send(
+              paymentPage(
+                'Тестовый callback обработан.',
+                'Вернитесь в WhatsApp. Подтверждение отправит бот. Деньги не списывались.',
+              ),
+            );
+        return { accepted: true, ...result };
+      });
+    });
+  }
   async function releaseHandoff(id: string) {
     await db.$transaction(async (tx) => {
       const tickets = await tx.handoff.findMany({
@@ -542,7 +632,8 @@ export async function buildApp(options: AppOptions = {}) {
     },
     { prefix: '/admin' },
   );
-  const demo = env.NODE_ENV !== 'production' && env.INTEGRATION_MODE === 'demo';
+  const demo =
+    env.NODE_ENV !== 'production' && env.INTEGRATION_MODE === 'demo' && env.DEV_ROUTES_ENABLED;
   if (demo) {
     const fromSchema = z
       .string()

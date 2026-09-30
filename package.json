@@ -27,7 +27,8 @@
     "sheets:migrate": "tsx scripts/migrate-sheets.ts",
     "db:validate": "prisma validate",
     "db:check": "tsx scripts/check-database.ts",
-    "test:openai": "tsx scripts/test-openai.ts"
+    "test:openai": "tsx scripts/test-openai.ts",
+    "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
     "@fastify/helmet": "13.1.1",

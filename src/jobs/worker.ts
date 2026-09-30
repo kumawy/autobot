@@ -101,17 +101,21 @@ export class Worker {
   }
   private async maintenance() {
     const { db, env } = this.deps;
-    const attempts = await db.paymentAttempt.findMany({
-      where: {
-        status: { in: ['PENDING', 'CREATION_UNKNOWN'] },
-        OR: [
-          { lastReconcileAt: null },
-          { lastReconcileAt: { lt: new Date(Date.now() - env.PAYMENT_RECONCILE_INTERVAL_MS) } },
-        ],
-        createdAt: { lt: new Date(Date.now() - 60000) },
-      },
-      take: env.PAYMENT_RECONCILE_BATCH_SIZE,
-    });
+    const attempts = this.deps.provider.merchantId
+      ? await db.paymentAttempt.findMany({
+          where: {
+            provider: this.deps.provider.name,
+            merchantId: this.deps.provider.merchantId,
+            status: { in: ['PENDING', 'CREATION_UNKNOWN'] },
+            OR: [
+              { lastReconcileAt: null },
+              { lastReconcileAt: { lt: new Date(Date.now() - env.PAYMENT_RECONCILE_INTERVAL_MS) } },
+            ],
+            createdAt: { lt: new Date(Date.now() - 60000) },
+          },
+          take: env.PAYMENT_RECONCILE_BATCH_SIZE,
+        })
+      : [];
     await db.$transaction(async (tx) => {
       for (const attempt of attempts)
         await enqueue(tx, {
@@ -137,14 +141,16 @@ export class Worker {
           orderId: event.orderId ?? undefined,
           payload: { eventId: event.id },
         });
-      const lag = await tx.order.findMany({
-        where: {
-          paymentStatus: { in: ['PAID', 'REFUNDED'] },
-          sheetSyncStatus: { not: 'LEGACY_RECONCILIATION_REQUIRED' },
-        },
-        take: 100,
-        orderBy: { sheetSyncedAt: 'asc' },
-      });
+      const lag = env.GOOGLE_SHEETS_ENABLED
+        ? await tx.order.findMany({
+            where: {
+              paymentStatus: { in: ['PAID', 'REFUNDED'] },
+              sheetSyncStatus: { not: 'LEGACY_RECONCILIATION_REQUIRED' },
+            },
+            take: 100,
+            orderBy: { sheetSyncedAt: 'asc' },
+          })
+        : [];
       for (const order of lag) {
         const binding = await tx.sheetBinding.findUnique({ where: { orderId: order.id } });
         if (
@@ -214,6 +220,12 @@ export class Worker {
     });
     if (!r.count) throw new BlockedError('LEASE_LOST');
   }
+  private assertPaymentProvider(attempt: { provider: string; merchantId: string }) {
+    if (attempt.provider !== this.deps.provider.name)
+      throw new BlockedError('PAYMENT_PROVIDER_MISMATCH');
+    if (!this.deps.provider.merchantId || attempt.merchantId !== this.deps.provider.merchantId)
+      throw new BlockedError('PAYMENT_MERCHANT_MISMATCH');
+  }
   async processJob(): Promise<boolean> {
     const { db, env, provider } = this.deps;
     const job = await claimJob(db, env.MAX_RETRY_ATTEMPTS);
@@ -231,6 +243,11 @@ export class Worker {
           handoffNotice?: boolean;
           templateParameters?: string[];
         };
+        if (
+          (!env.MANAGER_HANDOFF_ENABLED || !env.TELEGRAM_ENABLED) &&
+          (payload.purpose === 'operator_reply' || payload.purpose === 'support_reopen')
+        )
+          throw new BlockedError('MANAGER_HANDOFF_DISABLED');
         const ticket = payload.ticketId
           ? await db.handoff.findUnique({ where: { id: payload.ticketId } })
           : null;
@@ -354,6 +371,7 @@ export class Worker {
           await this.finish(job);
           return true;
         }
+        this.assertPaymentProvider(attempt);
         if (provider.name !== 'mock') {
           let readiness;
           try {
@@ -489,6 +507,12 @@ export class Worker {
         });
       } else if (job.kind === 'PAYMENT_RECONCILE') {
         const { attemptId } = job.payload as { attemptId: string };
+        this.assertPaymentProvider(
+          await db.paymentAttempt.findUniqueOrThrow({
+            where: { id: attemptId },
+            select: { provider: true, merchantId: true },
+          }),
+        );
         await new PaymentService(db).reconcileAttempt(provider, attemptId, undefined, {
           jobId: job.id,
           lockToken: job.lockToken!,
@@ -507,6 +531,7 @@ export class Worker {
           );
         await this.finish(job);
       } else if (job.kind === 'SHEETS') {
+        if (!env.GOOGLE_SHEETS_ENABLED) throw new BlockedError('GOOGLE_SHEETS_DISABLED');
         const order = await db.order.findUniqueOrThrow({
           where: { id: job.orderId! },
           include: { customer: true },
@@ -539,11 +564,14 @@ export class Worker {
             });
         });
       } else if (job.kind === 'TELEGRAM') {
+        if (!env.TELEGRAM_ENABLED) throw new BlockedError('TELEGRAM_DISABLED');
         const payload = job.payload as {
           text: string;
           ticketId?: string;
           sourceMessageId?: string;
         };
+        if (payload.ticketId && !env.MANAGER_HANDOFF_ENABLED)
+          throw new BlockedError('MANAGER_HANDOFF_DISABLED');
         await this.dispatch(job);
         const receipt = await this.deps.notifications.send(payload.text);
         await this.finish(job, async (tx) => {
@@ -709,7 +737,11 @@ export class Worker {
             where: { id: job.orderId, sheetSyncStatus: { not: 'LEGACY_RECONCILIATION_REQUIRED' } },
             data: { sheetSyncStatus: blocked ? 'BLOCKED' : 'PENDING' },
           });
-        if (job.kind !== 'TELEGRAM' && ['UNKNOWN', 'BLOCKED', 'DEAD'].includes(status))
+        if (
+          env.TELEGRAM_ENABLED &&
+          job.kind !== 'TELEGRAM' &&
+          ['UNKNOWN', 'BLOCKED', 'DEAD'].includes(status)
+        )
           await enqueue(tx, {
             key: `job-warning:${job.id}:${status}`,
             kind: 'TELEGRAM',

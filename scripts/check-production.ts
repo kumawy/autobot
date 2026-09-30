@@ -14,7 +14,11 @@ type Status =
 const report: { check: string; status: Status; detail: string }[] = [];
 const add = (check: string, status: Status, detail: string) =>
   report.push({ check, status, detail });
-const raw = process.env;
+const raw: NodeJS.ProcessEnv = {
+  ...process.env,
+  TELEGRAM_ALLOWED_MANAGER_IDS:
+    process.env.TELEGRAM_ALLOWED_USER_IDS || process.env.TELEGRAM_ALLOWED_MANAGER_IDS,
+};
 const required = [
   'DATABASE_URL',
   'ADMIN_TOKEN',

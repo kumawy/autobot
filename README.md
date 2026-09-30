@@ -2,7 +2,9 @@
 
 Локальный проект по `SPEC.md` и `PATCH-v1.1.md`: продажи музыкальной шкатулки на русском и казахском, оформление заказа, платёжные попытки, Google Sheets и передача диалога менеджеру.
 
-По согласованному режиму используются демонстрационный каталог и локальные имитации интеграций. Денежные средства не списываются, сообщения в настоящие WhatsApp и Telegram не отправляются. Демо-условия комплектации и доставки явно отмечены в `data/business.json` и не разрешают реальные платежи.
+По умолчанию `INTEGRATION_MODE=demo`: демонстрационный каталог и локальные имитации интеграций. Денежные средства не списываются, сообщения в настоящие WhatsApp и Telegram не отправляются. Демо-условия комплектации и доставки явно отмечены в `data/business.json` и не разрешают реальные платежи.
+
+Для настоящих OpenAI и тестового номера Meta добавлен `INTEGRATION_MODE=staging`: PostgreSQL остаётся источником данных, оплата — только mock, Telegram и Google Sheets отключены по умолчанию. Конфигурация и запуск описаны в [STAGING_DEPLOYMENT.md](docs/STAGING_DEPLOYMENT.md). Локальный симулятор сохраняет прежний режим.
 
 ## Быстрый запуск
 
@@ -40,6 +42,9 @@ npm run check            # TypeScript, ESLint, unit + реальные PostgreSQ
 npm run build
 npm run check:production # Проверка настроек/доступа; в demo ожидается exit 1
 npm run db:migrate
+npm run db:validate      # Проверка Prisma schema
+npm run db:check         # SELECT 1, безопасный результат без URL
+npm run test:integration # Временные отдельные PostgreSQL, без настоящих API
 npm run seed
 npm run dev              # HTTP отдельно для своей PostgreSQL
 npm run worker:dev       # Worker отдельно
@@ -60,5 +65,8 @@ npm run worker           # Собранный worker
 - [Проверка готовности production](docs/production-readiness.md)
 - [Фактически выполненные проверки](docs/verification.md)
 - [OpenAI и ограничения tools](docs/openai.md)
+- [Запуск development/staging с Supabase](docs/STAGING_DEPLOYMENT.md)
+- [Отдельная проверка OpenAI](docs/OPENAI_STAGING.md)
+- [Проверка тестового номера Meta](docs/META_WHATSAPP_DEMO.md)
 
-Настоящие аккаунты и ключи не предоставлены. Успешные локальные тесты не заменяют проверку merchant-контракта, шаблонов Meta, доступа Google и доставки сообщений в реальных аккаунтах.
+Проверка OpenAI выполняется отдельно: `DOTENV_CONFIG_PATH=.env.staging.local npm run --silent test:openai`. Успешные локальные тесты не заменяют проверку Supabase, доставки Meta и доступа к остальным аккаунтам. Статус фактически выполненных проверок указан в документации; секреты в репозитории отсутствуют.

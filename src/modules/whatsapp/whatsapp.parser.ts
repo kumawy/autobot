@@ -1,21 +1,32 @@
 import { z } from 'zod';
 import type { InboundMessage } from '../../types/domain.js';
 import { safeCustomerText } from '../../utils/security.js';
-const message = z.object({
-  id: z.string().min(1).max(300),
-  from: z.string().regex(/^\d{7,15}$/),
-  timestamp: z.string().optional(),
-  type: z.string(),
-  text: z.object({ body: z.string() }).optional(),
-  interactive: z
-    .object({
-      button_reply: z.object({ id: z.string() }).optional(),
-      list_reply: z.object({ id: z.string() }).optional(),
-    })
-    .optional(),
-  button: z.object({ payload: z.string() }).optional(),
-  context: z.object({ id: z.string().max(300) }).optional(),
-});
+const message = z
+  .object({
+    id: z.string().min(1).max(300),
+    from: z.string().regex(/^\d{7,15}$/),
+    timestamp: z.string().optional(),
+    type: z.string(),
+    text: z.object({ body: z.string() }).optional(),
+    interactive: z
+      .object({
+        type: z.string().optional(),
+        button_reply: z.object({ id: z.string().min(1).max(256) }).optional(),
+        list_reply: z.object({ id: z.string().min(1).max(256) }).optional(),
+      })
+      .optional(),
+    button: z.object({ payload: z.string().min(1).max(256) }).optional(),
+    context: z.object({ id: z.string().max(300) }).optional(),
+  })
+  .refine(
+    (value) =>
+      !(
+        value.type === 'interactive' &&
+        value.interactive?.button_reply &&
+        value.interactive.list_reply
+      ),
+    { message: 'AMBIGUOUS_INTERACTIVE_REPLY' },
+  );
 const statusSchema = z.object({
   id: z.string().min(1).max(300),
   status: z.string().min(1).max(40),
@@ -76,22 +87,32 @@ export function parseWebhook(
       }
       for (const raw of value.messages ?? []) {
         const m = message.parse(raw);
+        const interactive = m.type === 'interactive' ? m.interactive : undefined;
+        const replyType = interactive?.type;
+        const buttonReply = interactive?.button_reply;
+        const listReply = interactive?.list_reply;
         const actionId =
-          m.interactive?.button_reply?.id ?? m.interactive?.list_reply?.id ?? m.button?.payload;
+          m.type === 'button'
+            ? m.button?.payload
+            : replyType === 'button_reply' || (!replyType && buttonReply)
+              ? buttonReply?.id
+              : replyType === 'list_reply' || (!replyType && listReply)
+                ? listReply?.id
+                : undefined;
         const type =
           m.type === 'text'
             ? 'text'
-            : m.type === 'interactive'
+            : m.type === 'interactive' && actionId
               ? 'interactive'
-              : m.type === 'button'
+              : m.type === 'button' && actionId
                 ? 'button'
                 : 'unsupported';
         messages.push({
           id: m.id,
           from: m.from,
           type,
-          ...(m.text ? { text: safeCustomerText(m.text.body) } : {}),
-          ...(actionId ? { actionId: actionId.slice(0, 256) } : {}),
+          ...(m.type === 'text' && m.text ? { text: safeCustomerText(m.text.body) } : {}),
+          ...(actionId ? { actionId } : {}),
           ...(timestampSeconds(m.timestamp) ? { timestamp: timestampSeconds(m.timestamp) } : {}),
           ...(m.context?.id ? { replyToMessageId: m.context.id } : {}),
           ...(type === 'unsupported' ? { mediaType: m.type } : {}),

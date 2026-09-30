@@ -124,6 +124,62 @@ describe('WhatsApp webhook parser', () => {
     expect(parsed.statuses[1]).toMatchObject({ correlationId: 'job-1', timestamp: 1750000001 });
     expect(parsed.messages[0]).toMatchObject({ replyToMessageId: 'outgoing-1' });
   });
+  it('never truncates action IDs or consumes text/action payloads from another message type', () => {
+    expect(() =>
+      parseWebhook(
+        envelope([
+          {
+            ...baseMessage,
+            type: 'interactive',
+            interactive: { button_reply: { id: 'a'.repeat(257) } },
+          },
+        ]),
+      ),
+    ).toThrow();
+    const result = parseWebhook(
+      envelope([
+        {
+          ...baseMessage,
+          type: 'text',
+          text: { body: 'Hello' },
+          interactive: { button_reply: { id: 'forged' } },
+        },
+        {
+          ...baseMessage,
+          id: '2',
+          type: 'image',
+          text: { body: 'Must not become an address' },
+          context: { id: 'wamid.origin' },
+        },
+        { ...baseMessage, id: '3', type: 'interactive', interactive: { type: 'nfm_reply' } },
+      ]),
+    );
+    expect(result.messages[0]).not.toHaveProperty('actionId');
+    expect(result.messages[1]).toMatchObject({
+      type: 'unsupported',
+      mediaType: 'image',
+      replyToMessageId: 'wamid.origin',
+    });
+    expect(result.messages[1]).not.toHaveProperty('text');
+    expect(result.messages[2]).toMatchObject({ type: 'unsupported', mediaType: 'interactive' });
+  });
+  it('rejects ambiguous interactive replies rather than selecting a different action', () => {
+    expect(() =>
+      parseWebhook(
+        envelope([
+          {
+            ...baseMessage,
+            type: 'interactive',
+            interactive: {
+              type: 'button_reply',
+              button_reply: { id: 'a' },
+              list_reply: { id: 'b' },
+            },
+          },
+        ]),
+      ),
+    ).toThrow('AMBIGUOUS_INTERACTIVE_REPLY');
+  });
 });
 
 describe('WhatsApp Cloud API client payloads', () => {
@@ -205,6 +261,17 @@ describe('WhatsApp Cloud API client payloads', () => {
   it('does not expose API response bodies or credentials in transport errors', async () => {
     http.mockResolvedValueOnce(new Response('sensitive response body', { status: 429 }));
     await expect(client.sendText('77001234567', 'text')).rejects.toThrow('WhatsApp HTTP 429');
+    http.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'sensitive-token', message: 'private provider detail' } }),
+        { status: 400 },
+      ),
+    );
+    await expect(client.sendText('77001234567', 'text')).rejects.toMatchObject({
+      code: 'WhatsApp HTTP 400',
+      outcome: 'REJECTED',
+      retryable: false,
+    });
   });
   it('requires a send acknowledgement while allowing read receipt acknowledgements', async () => {
     http.mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200 }));
@@ -230,6 +297,55 @@ describe('WhatsApp Cloud API client payloads', () => {
     expect(JSON.parse(String(http.mock.calls[2]?.[1]?.body)).biz_opaque_callback_data).toBe(
       'job-123',
     );
+  });
+  it.each([
+    null,
+    [],
+    { messages: [null] },
+    { messages: [{ id: 42 }] },
+    { messages: [{ id: '   ' }] },
+  ])('normalizes malformed successful acknowledgements to UNKNOWN: %j', async (body) => {
+    http.mockResolvedValueOnce(new Response(JSON.stringify(body), { status: 200 }));
+    await expect(client.sendText('77001234567', 'text')).rejects.toMatchObject({
+      code: 'WHATSAPP_ACK_UNKNOWN',
+      outcome: 'UNKNOWN',
+      retryable: false,
+    });
+  });
+  it('aborts an unanswered send at the configured deadline and leaves the outcome unknown', async () => {
+    const timeoutClient = new WhatsAppClient({
+      accessToken: 'test-token',
+      phoneNumberId: 'phone-id',
+      graphApiVersion: 'v-test',
+      timeoutMs: 10,
+    });
+    http.mockImplementationOnce(
+      (_url, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init.signal!;
+          signal.addEventListener('abort', () => reject(new Error('private timeout details')), {
+            once: true,
+          });
+        }),
+    );
+    await expect(timeoutClient.sendText('77001234567', 'text')).rejects.toMatchObject({
+      code: 'WHATSAPP_SEND_UNKNOWN',
+      outcome: 'UNKNOWN',
+      retryable: false,
+    });
+    expect((http.mock.calls[0]?.[1]?.signal as AbortSignal).aborted).toBe(true);
+  });
+  it('rejects unsafe correlation before sending and keeps a 5xx result ambiguous', async () => {
+    await expect(
+      client.sendText('77001234567', 'text', { correlationId: 'secret with whitespace' }),
+    ).rejects.toMatchObject({ code: 'INVALID_CORRELATION', outcome: 'REJECTED' });
+    expect(http).not.toHaveBeenCalled();
+    http.mockResolvedValueOnce(new Response('provider-private-body', { status: 503 }));
+    await expect(client.sendText('77001234567', 'text')).rejects.toMatchObject({
+      code: 'WHATSAPP_HTTP_503',
+      outcome: 'UNKNOWN',
+      retryable: false,
+    });
   });
 });
 

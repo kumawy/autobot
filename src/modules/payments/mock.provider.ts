@@ -40,13 +40,14 @@ const eventSchema = z
 export interface MockPaymentOptions {
   secret: string;
   appBaseUrl: string;
+  checkoutPath?: '/dev/mock-payment' | '/mock-payment';
 }
 
 export type MockPaymentPayloadInput = Omit<VerifiedPaymentEvent, 'provider' | 'eventId'> & {
   eventId?: string;
 };
 
-/** For local development only. Runtime configuration must forbid it in production. */
+/** For local demo and isolated staging only. Runtime configuration must forbid production. */
 export class MockPaymentProvider implements PaymentProvider {
   readonly name = 'mock';
   readonly merchantId = 'demo';
@@ -86,11 +87,55 @@ export class MockPaymentProvider implements PaymentProvider {
     }
     return {
       externalPaymentId,
-      paymentUrl: new URL(
-        `/dev/mock-payment/${encodeURIComponent(input.orderId)}`,
-        this.options.appBaseUrl,
-      ).toString(),
+      paymentUrl:
+        this.options.checkoutPath === '/mock-payment'
+          ? this.checkoutUrl(input.attemptId)
+          : new URL(
+              `/dev/mock-payment/${encodeURIComponent(input.orderId)}`,
+              this.options.appBaseUrl,
+            ).toString(),
     };
+  }
+
+  /** A time-limited capability for the staging checkout page; independent of callback signatures. */
+  checkoutUrl(attemptId: string): string {
+    if (
+      this.options.checkoutPath !== '/mock-payment' ||
+      !/^[A-Za-z0-9_-]{1,100}$/.test(attemptId)
+    ) {
+      throw new PaymentProviderError(
+        'Signed mock checkout requires a staging route and valid attempt ID',
+      );
+    }
+    const expires = String(Math.floor(Date.now() / 1000) + 86400);
+    const url = new URL(`/mock-payment/${encodeURIComponent(attemptId)}`, this.options.appBaseUrl);
+    url.searchParams.set('expires', expires);
+    url.searchParams.set('token', this.checkoutToken(attemptId, expires));
+    return url.toString();
+  }
+
+  validateCheckoutToken(attemptId: string, expires: string, token: string): boolean {
+    if (
+      this.options.checkoutPath !== '/mock-payment' ||
+      !/^[A-Za-z0-9_-]{1,100}$/.test(attemptId) ||
+      !/^[1-9]\d{0,11}$/.test(expires) ||
+      !/^[a-f0-9]{64}$/.test(token)
+    )
+      return false;
+    const expiration = Number(expires);
+    const now = Math.floor(Date.now() / 1000);
+    if (!Number.isSafeInteger(expiration) || expiration <= now || expiration > now + 86460)
+      return false;
+    return timingSafeEqual(
+      Buffer.from(token, 'hex'),
+      Buffer.from(this.checkoutToken(attemptId, expires), 'hex'),
+    );
+  }
+
+  private checkoutToken(attemptId: string, expires: string): string {
+    return createHmac('sha256', this.options.secret)
+      .update(JSON.stringify(['musicbox:mock-checkout:v1', attemptId, expires]))
+      .digest('hex');
   }
 
   buildSignedPayload(input: MockPaymentPayloadInput): PaymentWebhookInput {

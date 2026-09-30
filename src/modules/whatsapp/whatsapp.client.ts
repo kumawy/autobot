@@ -58,8 +58,9 @@ export class WhatsAppClient implements WhatsAppTransport {
     if (!response.ok) {
       let code = String(response.status);
       try {
-        const error = (await response.json()) as { error?: { code?: number } };
-        if (error.error?.code) code += `_${error.error.code}`;
+        const error = (await response.json()) as { error?: { code?: unknown } } | null;
+        if (typeof error?.error?.code === 'number' && Number.isSafeInteger(error.error.code))
+          code += `_${error.error.code}`;
       } catch {
         /* Do not include provider response text. */
       }
@@ -69,15 +70,21 @@ export class WhatsAppClient implements WhatsAppTransport {
         retryAfterMs: retryAfterMilliseconds(response.headers.get('retry-after')),
       });
     }
-    let data: { messages?: { id?: string }[]; success?: boolean };
+    let data: unknown;
     try {
-      data = (await response.json()) as typeof data;
+      data = await response.json();
     } catch {
       throw new DeliveryError('WHATSAPP_ACK_UNKNOWN', { outcome: 'UNKNOWN' });
     }
-    const id = data.messages?.[0]?.id;
-    if (payload.status === 'read' && data.success === true) return '';
-    if (!id || typeof id !== 'string')
+    if (!data || typeof data !== 'object' || Array.isArray(data))
+      throw new DeliveryError('WHATSAPP_ACK_UNKNOWN', { outcome: 'UNKNOWN' });
+    const ack = data as { messages?: unknown; success?: unknown };
+    const first = Array.isArray(ack.messages)
+      ? (ack.messages[0] as { id?: unknown } | undefined)
+      : undefined;
+    const id = first?.id;
+    if (payload.status === 'read' && ack.success === true) return '';
+    if (typeof id !== 'string' || !id.trim() || id.length > 300)
       throw new DeliveryError('WHATSAPP_ACK_UNKNOWN', { outcome: 'UNKNOWN' });
     return id;
   }

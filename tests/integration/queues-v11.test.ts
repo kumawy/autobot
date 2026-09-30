@@ -9,12 +9,14 @@ import { createServer } from 'node:net';
 import EmbeddedPostgres from 'embedded-postgres';
 import type { PrismaClient } from '@prisma/client';
 import { buildApp, type AppOptions } from '../../src/app.js';
-import { createDatabase } from '../../src/db/prisma.js';
+import { createDatabase, json } from '../../src/db/prisma.js';
 import { readEnv, type Env } from '../../src/config/env.js';
 import { enqueue } from '../../src/jobs/outbox.js';
 import { claimJob, recoverLeases } from '../../src/jobs/leases.js';
 import { DeliveryError } from '../../src/modules/notifications/delivery-error.js';
 import type { WhatsAppTransport } from '../../src/modules/whatsapp/whatsapp.client.js';
+import { prepareCheckout } from '../../src/modules/orders/checkout.js';
+import type { OrderData } from '../../src/types/domain.js';
 let db: PrismaClient, env: Env, pg: EmbeddedPostgres, directory: string, port: number;
 let runtime: Awaited<ReturnType<typeof buildApp>>;
 async function freePort() {
@@ -50,7 +52,7 @@ beforeAll(async () => {
   await promisify(execFile)(
     process.execPath,
     ['node_modules/prisma/build/index.js', 'migrate', 'deploy'],
-    { env: { ...process.env, DATABASE_URL: env.DATABASE_URL }, timeout: 60000 },
+    { env: { ...process.env, DIRECT_URL: '', DATABASE_URL: env.DATABASE_URL }, timeout: 60000 },
   );
   db = createDatabase(env.DATABASE_URL);
 });
@@ -558,3 +560,229 @@ it('an authoritative early READ resolves a send whose HTTP acknowledgement is lo
   ).toBe('READ');
   expect((await db.outboxJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe('DONE');
 });
+
+async function scopedPayment(
+  provider: string,
+  merchantId: string,
+  status: 'CREATING' | 'PENDING' = 'CREATING',
+) {
+  const c = await customer();
+  const order = await db.order.create({
+    data: {
+      customerId: c.id,
+      publicOrderId: `MB-${randomUUID()}`,
+      productId: 'music-box-set',
+      productName: 'Demo',
+      recipientName: 'Test recipient',
+      recipientPhone: '+77070000001',
+      city: 'Алматы',
+      address: 'Test address',
+      unitPrice: 20000,
+      subtotalAmount: 20000,
+      totalAmount: 20000,
+      paymentStatus: status,
+      orderStatus: 'AWAITING_PAYMENT',
+      selectedDiscIds: runtime.catalog
+        .discs(true)
+        .slice(0, runtime.business.includedDiscCount)
+        .map((disc) => disc.id),
+    },
+  });
+  const checkout = structuredClone(order) as unknown as OrderData;
+  prepareCheckout(checkout, runtime.business, runtime.catalog, env.MAX_ORDER_QUANTITY);
+  await db.order.update({
+    where: { id: order.id },
+    data: {
+      selectedDiscIds: checkout.selectedDiscIds,
+      packageSnapshot: json(checkout.packageSnapshot),
+      deliverySnapshot: json(checkout.deliverySnapshot),
+      deliveryMode: checkout.deliveryMode,
+      deliveryAmount: checkout.deliveryAmount,
+      subtotalAmount: checkout.subtotalAmount,
+      totalAmount: checkout.totalAmount,
+      configVersion: checkout.configVersion,
+    },
+  });
+  const attempt = await db.paymentAttempt.create({
+    data: {
+      orderId: order.id,
+      provider,
+      merchantId,
+      amount: checkout.totalAmount,
+      currency: 'KZT',
+      status,
+      externalPaymentId: status === 'PENDING' ? `payment-${randomUUID()}` : null,
+      createdAt: new Date(Date.now() - 120000),
+    },
+  });
+  return { c, order, attempt };
+}
+it.each([
+  ['freedompay', 'demo', 'PAYMENT_PROVIDER_MISMATCH'],
+  ['mock', 'another-merchant', 'PAYMENT_MERCHANT_MISMATCH'],
+])(
+  'never creates a persisted %s/%s attempt using current provider credentials',
+  async (providerName, merchantId, code) => {
+    const fixture = await scopedPayment(providerName, merchantId);
+    const provider = runtime.provider;
+    const create = vi.spyOn(provider, 'createPayment');
+    await replace({ provider });
+    const key = `foreign-create:${fixture.attempt.id}`;
+    await db.$transaction((tx) =>
+      enqueue(tx, {
+        key,
+        kind: 'CREATE_PAYMENT',
+        customerId: fixture.c.id,
+        orderId: fixture.order.id,
+        payload: { attemptId: fixture.attempt.id },
+      }),
+    );
+    await runtime.worker.processJob();
+    expect(create).not.toHaveBeenCalled();
+    expect(await db.outboxJob.findUniqueOrThrow({ where: { dedupeKey: key } })).toMatchObject({
+      status: 'BLOCKED',
+      lastError: code,
+      dispatchStartedAt: null,
+    });
+    expect(
+      await db.paymentAttempt.findUniqueOrThrow({ where: { id: fixture.attempt.id } }),
+    ).toMatchObject({
+      provider: providerName,
+      merchantId,
+      externalPaymentId: null,
+      status: 'CREATING',
+    });
+    expect(await db.order.findUniqueOrThrow({ where: { id: fixture.order.id } })).toMatchObject({
+      paymentStatus: 'CREATING',
+      externalPaymentId: null,
+      paymentProvider: null,
+    });
+  },
+);
+it('reconciliation maintenance selects only the active provider and merchant', async () => {
+  const current = await scopedPayment('mock', 'demo', 'PENDING');
+  const foreignProvider = await scopedPayment('freedompay', 'demo', 'PENDING');
+  const foreignMerchant = await scopedPayment('mock', 'other-merchant', 'PENDING');
+  const provider = runtime.provider;
+  const query = vi.spyOn(provider, 'getPaymentStatus').mockResolvedValue({
+    eventId: randomUUID(),
+    provider: 'mock',
+    merchantId: 'demo',
+    merchantReference: current.attempt.merchantReference,
+    externalPaymentId: current.attempt.externalPaymentId!,
+    orderId: current.order.id,
+    amount: current.attempt.amount,
+    currency: 'KZT',
+    status: 'PENDING',
+  });
+  await replace({ provider });
+  await runtime.worker.drain();
+  expect(query).toHaveBeenCalledExactlyOnceWith(current.attempt.externalPaymentId);
+  const jobs = await db.outboxJob.findMany({ where: { kind: 'PAYMENT_RECONCILE' } });
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]?.payload).toMatchObject({ attemptId: current.attempt.id });
+  for (const foreign of [foreignProvider, foreignMerchant]) {
+    expect(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: foreign.attempt.id } }))
+        .lastReconcileAt,
+    ).toBeNull();
+  }
+});
+it('an already queued reconciliation never queries with another merchant credentials', async () => {
+  const fixture = await scopedPayment('mock', 'other-merchant', 'PENDING');
+  const query = vi.spyOn(runtime.provider, 'getPaymentStatus');
+  const key = `foreign-reconcile:${fixture.attempt.id}`;
+  await db.$transaction((tx) =>
+    enqueue(tx, {
+      key,
+      kind: 'PAYMENT_RECONCILE',
+      orderId: fixture.order.id,
+      payload: { attemptId: fixture.attempt.id },
+    }),
+  );
+  await runtime.worker.processJob();
+  expect(query).not.toHaveBeenCalled();
+  expect(await db.outboxJob.findUniqueOrThrow({ where: { dedupeKey: key } })).toMatchObject({
+    status: 'BLOCKED',
+    lastError: 'PAYMENT_MERCHANT_MISMATCH',
+    dispatchStartedAt: null,
+  });
+});
+it.each([true, false])(
+  'handoff disabled cancels queued bridge sends while payment notifications follow Telegram enabled=%s',
+  async (telegramEnabled) => {
+    const wa = vi.fn(async (_to: string, _message: unknown) => randomUUID());
+    const telegram = vi.fn(async (_text: string) => ({
+      chatId: '-100123456789',
+      messageId: String(Date.now()),
+    }));
+    await replace({
+      env: { ...env, TELEGRAM_ENABLED: telegramEnabled, MANAGER_HANDOFF_ENABLED: false },
+      whatsapp: { send: wa, markAsRead: async () => {} },
+      notifications: { send: telegram },
+    });
+    const c = await customer();
+    await db.customer.update({ where: { id: c.id }, data: { conversationState: 'HUMAN_HANDOFF' } });
+    const ticket = await db.handoff.create({
+      data: {
+        customerId: c.id,
+        reason: 'Previously opened',
+        status: 'ASSIGNED',
+        assignedManagerId: '1001',
+      },
+    });
+    const reply = await queue(c.id, {
+      type: 'text',
+      text: 'DO_NOT_SEND_OPERATOR',
+      purpose: 'operator_reply',
+      ticketId: ticket.id,
+      managerId: '1001',
+    });
+    const reopen = await queue(c.id, {
+      type: 'template',
+      name: 'support_reopen',
+      language: 'ru',
+      parameters: [],
+      purpose: 'support_reopen',
+      ticketId: ticket.id,
+    });
+    await db.$transaction(async (tx) => {
+      await enqueue(tx, {
+        key: 'disabled-ticket-forward',
+        kind: 'TELEGRAM',
+        customerId: c.id,
+        payload: { ticketId: ticket.id, text: 'DO_NOT_FORWARD_CUSTOMER' },
+      });
+      await enqueue(tx, {
+        key: 'independent-payment-notification',
+        kind: 'TELEGRAM',
+        customerId: c.id,
+        payload: { text: 'PAYMENT_NOTIFICATION' },
+      });
+    });
+    const paid = await queue(c.id, { type: 'text', text: 'PAYMENT_OK', purpose: 'order_paid' });
+    await runtime.worker.drain();
+    for (const job of [reply, reopen])
+      expect(await db.outboxJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({
+        status: 'BLOCKED',
+        lastError: 'MANAGER_HANDOFF_DISABLED',
+        dispatchStartedAt: null,
+      });
+    expect(
+      await db.outboxJob.findUniqueOrThrow({ where: { dedupeKey: 'disabled-ticket-forward' } }),
+    ).toMatchObject({ status: 'BLOCKED', dispatchStartedAt: null });
+    expect(await db.outboxJob.findUniqueOrThrow({ where: { id: paid.id } })).toMatchObject({
+      status: 'DONE',
+    });
+    expect(wa).toHaveBeenCalledExactlyOnceWith(
+      c.whatsappId,
+      expect.objectContaining({ text: 'PAYMENT_OK' }),
+      expect.anything(),
+    );
+    expect(telegram.mock.calls.some(([text]) => text === 'PAYMENT_NOTIFICATION')).toBe(
+      telegramEnabled,
+    );
+    expect(telegram.mock.calls.some(([text]) => text === 'DO_NOT_FORWARD_CUSTOMER')).toBe(false);
+    expect(await db.telegramMessageBinding.count({ where: { ticketId: ticket.id } })).toBe(0);
+  },
+);

@@ -25,7 +25,7 @@ function customer(language: Language | null = 'ru'): CustomerData {
     editingField: null,
   };
 }
-function fixture(language: Language | null = 'ru', replay = true) {
+function fixture(language: Language | null = 'ru', replay = true, managerHandoffEnabled = true) {
   const catalog = new CatalogService({ productPrice: 20000 });
   const answer = vi.fn(async (_input: AiInput): Promise<AiAnswer> => ({ text: 'Цена 20 000 ₸.' }));
   const service = new ConversationService({
@@ -34,6 +34,7 @@ function fixture(language: Language | null = 'ru', replay = true) {
     productPrice: 20000,
     maxQuantity: 10,
     processFirstMessageAfterLanguage: replay,
+    managerHandoffEnabled,
   });
   let result: ConversationResult = { customer: customer(language), order: null, messages: [] };
   let sequence = 0;
@@ -61,6 +62,108 @@ function fixture(language: Language | null = 'ru', replay = true) {
 }
 
 describe('language and safe routing', () => {
+  it.each(['ru', 'kk'] as const)(
+    'resumes a legacy handoff in %s without consuming the triggering text as a field',
+    async (language) => {
+      const f = fixture(language, true, false);
+      await f.click(A.MENU_ORDER);
+      await f.text('Арман');
+      Object.assign(f.current().customer, {
+        conversationState: 'HUMAN_HANDOFF',
+        previousState: 'ORDER_PHONE',
+      });
+      const before = structuredClone(f.current().order);
+      const resumed = await f.text('+77011234567');
+      expect(resumed.resumeBot).toBe(true);
+      expect(resumed.handoff).toBeUndefined();
+      expect(resumed.customer).toMatchObject({
+        conversationState: 'ORDER_PHONE',
+        previousState: null,
+      });
+      expect(resumed.order).toEqual(before);
+      expect(JSON.stringify(resumed.messages)).toContain(
+        language === 'ru' ? 'не подключён' : 'қосылмаған',
+      );
+      expect(JSON.stringify(resumed.messages)).toContain(
+        language === 'ru' ? 'номер телефона' : 'телефон нөмірін',
+      );
+      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_CITY');
+      expect(f.answer).not.toHaveBeenCalled();
+    },
+  );
+  it('honors STOP before recovering a legacy disabled handoff on the next message', async () => {
+    const f = fixture('ru', true, false);
+    await f.click(A.MENU_ORDER);
+    Object.assign(f.current().customer, {
+      conversationState: 'HUMAN_HANDOFF',
+      previousState: 'ORDER_NAME',
+      notificationConsent: true,
+    });
+    const before = structuredClone(f.current().order);
+    const stopped = await f.text('стоп');
+    expect(stopped.customer.notificationConsent).toBe(false);
+    expect(stopped.customer.optedOutAt).toBeInstanceOf(Date);
+    expect(stopped.resumeBot).toBeUndefined();
+    expect(stopped.customer.conversationState).toBe('HUMAN_HANDOFF');
+    expect(stopped.order).toEqual(before);
+    const resumed = await f.text('Арман');
+    expect(resumed.resumeBot).toBe(true);
+    expect(resumed.customer).toMatchObject({
+      conversationState: 'ORDER_NAME',
+      notificationConsent: false,
+    });
+    expect(resumed.order).toEqual(before);
+  });
+  it.each(['ru', 'kk'] as const)(
+    'keeps an editable draft at its current step with manager disabled in %s',
+    async (language) => {
+      const f = fixture(language, true, false);
+      await f.click(A.MENU_ORDER);
+      await f.text('Арман');
+      const before = structuredClone(f.current());
+      const after = await f.click(A.MANAGER);
+      expect(after.handoff).toBeUndefined();
+      expect(after.customer).toEqual(before.customer);
+      expect(after.order).toEqual(before.order);
+      expect(JSON.stringify(after.messages)).toContain(
+        language === 'ru' ? 'не подключён' : 'қосылмаған',
+      );
+      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_CITY');
+      expect(f.answer).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps disabled AI fallbacks reversible without accepting an AI handoff promise', async () => {
+    const f = fixture('ru', true, false);
+    for (const answer of [
+      { action: 'request_human_handoff' as const, text: 'Менеджер скоро ответит' },
+      { text: 'Менеджер свяжется с вами через час.' },
+      {},
+    ]) {
+      f.answer.mockResolvedValueOnce(answer);
+      const result = await f.text('Уточните гарантию');
+      expect(result.customer.conversationState).toBe('MAIN_MENU');
+      expect(result.handoff).toBeUndefined();
+      expect(JSON.stringify(result.messages)).not.toContain('скоро ответит');
+      expect(JSON.stringify(result.messages)).toContain('не подключён');
+    }
+    f.answer.mockRejectedValueOnce(new Error('private transport details'));
+    const failed = await f.text('Вопрос');
+    expect(failed.customer.conversationState).toBe('MAIN_MENU');
+    expect(failed.handoff).toBeUndefined();
+    expect(JSON.stringify(failed.messages)).not.toContain('private transport');
+    expect((await f.click(A.MENU_ORDER)).customer.conversationState).toBe('ORDER_NAME');
+  });
+  it('does not cancel or unfreeze a pending checkout when manager is disabled', async () => {
+    const f = fixture('ru', true, false);
+    await f.complete();
+    const pending = structuredClone(await f.click(A.ORDER_CONFIRM));
+    const result = await f.click(A.ORDER_CANCEL);
+    expect(result.handoff).toBeUndefined();
+    expect(result.createPayment).toBeUndefined();
+    expect(result.order).toEqual(pending.order);
+    expect(result.customer).toEqual(pending.customer);
+    expect(JSON.stringify(result.messages)).toContain('не подключён');
+  });
   it.each(['ru', 'kk'] as const)(
     'keeps the original question and replays it once in %s',
     async (language) => {

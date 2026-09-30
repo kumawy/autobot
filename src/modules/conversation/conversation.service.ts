@@ -31,7 +31,8 @@ interface Options {
   maxQuantity: number;
   processFirstMessageAfterLanguage: boolean;
   business?: BusinessDataConfig;
-  integrationMode?: 'demo' | 'live';
+  integrationMode?: 'demo' | 'staging' | 'live';
+  managerHandoffEnabled?: boolean;
 }
 interface Input {
   customer: CustomerData;
@@ -126,7 +127,11 @@ export class ConversationService {
       return result;
     }
     if (customer.conversationState === 'HUMAN_HANDOFF') {
-      if (resumeRequested) {
+      if (this.options.managerHandoffEnabled === false) {
+        result.resumeBot = true;
+        this.handoff(result, 'MANAGER_DISABLED');
+        this.restore(result);
+      } else if (resumeRequested) {
         result.resumeBot = true;
         this.restore(result);
       } else if (menuRequested) {
@@ -210,8 +215,8 @@ export class ConversationService {
     if (input.message.type === 'unsupported') {
       say(
         result,
-        'Пока могу обработать текст и кнопки. Напишите сообщение текстом или попросите менеджера.',
-        'Әзірге мәтін мен батырмаларды өңдей аламын. Мәтін жазыңыз немесе менеджерді шақырыңыз.',
+        'Пока могу обработать текст и кнопки. Напишите сообщение текстом.',
+        'Әзірге мәтін мен батырмаларды өңдей аламын. Хабарламаңызды мәтінмен жазыңыз.',
       );
       return result;
     }
@@ -361,7 +366,7 @@ export class ConversationService {
         assertCheckoutReady(order, {
           business: this.business,
           catalog: this.options.catalog,
-          mode: this.options.integrationMode ?? 'demo',
+          mode: this.options.integrationMode === 'live' ? 'live' : 'demo',
         });
       } catch {
         return this.handoff(result, 'CHECKOUT_REQUIRES_REVIEW');
@@ -496,8 +501,8 @@ export class ConversationService {
     if (result.order?.paymentStatus === 'PAID' && /оплат|плат[её]ж|төле|төлем/iu.test(text)) {
       say(
         result,
-        `Заказ ${result.order.publicOrderId} оплачен. По вопросам заказа поможет менеджер.`,
-        `${result.order.publicOrderId} тапсырысы төленді. Тапсырыс бойынша менеджер көмектеседі.`,
+        `Заказ ${result.order.publicOrderId} оплачен.${this.options.managerHandoffEnabled === false ? '' : ' По вопросам заказа поможет менеджер.'}`,
+        `${result.order.publicOrderId} тапсырысы төленді.${this.options.managerHandoffEnabled === false ? '' : ' Тапсырыс бойынша менеджер көмектеседі.'}`,
       );
       return result;
     }
@@ -640,16 +645,16 @@ export class ConversationService {
       product.description ??
       choose(
         lang(result),
-        'Точное описание уточняется у менеджера.',
-        'Нақты сипаттаманы менеджерден нақтылау қажет.',
+        'Точное описание пока не заполнено.',
+        'Нақты сипаттама әзірге толтырылмаған.',
       );
     const parts = [`${product.name}\n${money(this.options.productPrice)} ₸`, description];
     if (product.demo)
       parts.push(
         choose(
           lang(result),
-          'Демонстрационный каталог. Наличие и условия продажи уточняются у менеджера.',
-          'Демонстрациялық каталог. Қолжетімділігі мен сату шарттарын менеджерден нақтылау қажет.',
+          'Демонстрационный каталог. Наличие и условия продажи ещё не утверждены.',
+          'Демонстрациялық каталог. Қолжетімділік пен сату шарттары әлі бекітілмеген.',
         ),
       );
     if (!product.images.length)
@@ -696,8 +701,8 @@ export class ConversationService {
     if (!discs.length) {
       say(
         result,
-        'Сейчас в каталоге нет доступных мелодий. Поможет менеджер.',
-        'Қазір каталогта қолжетімді әуендер жоқ. Менеджер көмектеседі.',
+        'Сейчас в каталоге нет доступных мелодий.',
+        'Қазір каталогта қолжетімді әуендер жоқ.',
       );
       return;
     }
@@ -1068,6 +1073,14 @@ export class ConversationService {
   }
 
   private handoff(result: ConversationResult, reason: string): ConversationResult {
+    if (this.options.managerHandoffEnabled === false) {
+      say(
+        result,
+        'Менеджер в этом тестовом режиме не подключён. Я могу помочь с каталогом и оформлением. Продолжите текущий шаг или напишите «меню».',
+        'Бұл сынақ режимінде менеджер қосылмаған. Каталог пен тапсырысты рәсімдеуге көмектесе аламын. Ағымдағы қадамды жалғастырыңыз немесе «мәзір» деп жазыңыз.',
+      );
+      return result;
+    }
     result.customer.previousState = result.customer.conversationState;
     result.customer.conversationState = 'HUMAN_HANDOFF';
     result.handoff = { reason };
@@ -1097,8 +1110,17 @@ export class ConversationService {
           conversationVersion: result.customer.conversationVersion,
         },
       });
-      if (answer.action === 'request_human_handoff') {
+      if (
+        answer.action === 'request_human_handoff' ||
+        (this.options.managerHandoffEnabled === false &&
+          answer.text &&
+          /менеджер|оператор|кеңесші|специалист|маман|адаммен сөйлес/iu.test(answer.text))
+      ) {
         this.handoff(result, answer.reason ?? 'AI_UNCERTAIN');
+        return;
+      }
+      if (!answer.text && !answer.action) {
+        this.handoff(result, 'AI_UNCERTAIN');
         return;
       }
       if (answer.text) result.messages.push({ type: 'text', text: answer.text.slice(0, 4000) });
