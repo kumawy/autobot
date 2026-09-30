@@ -1,0 +1,26 @@
+[
+  {
+    "id": "disc_001",
+    "title": "Interstellar",
+    "artist": "Hans Zimmer",
+    "available": true,
+    "imageUrl": null,
+    "demo": true
+  },
+  {
+    "id": "disc_002",
+    "title": "Harry Potter",
+    "artist": null,
+    "available": true,
+    "imageUrl": null,
+    "demo": true
+  },
+  {
+    "id": "disc_003",
+    "title": "Für Elise",
+    "artist": "Ludwig van Beethoven",
+    "available": false,
+    "imageUrl": null,
+    "demo": true
+  }
+]

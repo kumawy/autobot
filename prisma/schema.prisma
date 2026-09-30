@@ -1,0 +1,359 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Language {
+  ru
+  kk
+}
+
+enum ConversationState {
+  AWAITING_LANGUAGE
+  MAIN_MENU
+  PRODUCT_VIEW
+  DISC_LIST
+  AI_QA
+  ORDER_NAME
+  ORDER_PHONE
+  ORDER_CITY
+  ORDER_ADDRESS
+  ORDER_DISC
+  ORDER_QUANTITY
+  ORDER_CONFIRMATION
+  PAYMENT_PENDING
+  PAID
+  HUMAN_HANDOFF
+  CANCEL_CONFIRMATION
+  ORDER_CONSENT
+}
+
+enum OrderStatus {
+  DRAFT
+  AWAITING_CONFIRMATION
+  AWAITING_PAYMENT
+  PAID
+  PROCESSING
+  SHIPPED
+  COMPLETED
+  CANCELLED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum PaymentStatus {
+  CREATING
+  CREATION_UNKNOWN
+  EXPIRED
+  REVIEW_REQUIRED
+  REFUND_PENDING
+  NOT_CREATED
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum JobStatus {
+  PROCESSING
+  RETRY
+  BLOCKED
+  UNKNOWN
+  DEAD
+  PENDING
+  DONE
+  FAILED
+}
+
+enum InboxStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  RETRY
+  DEAD
+}
+
+model Customer {
+  id                         String             @id @default(uuid())
+  whatsappId                 String             @unique
+  preferredLanguage          Language?
+  conversationState          ConversationState  @default(AWAITING_LANGUAGE)
+  firstUnhandledMessage      String?
+  currentOrderId             String?
+  selectedDiscId             String?
+  editingField               String?
+  conversationVersion        Int                @default(0)
+  processingToken            String?
+  processingUntil            DateTime?
+  previousState              ConversationState?
+  selectedDiscIds            String[]           @default([])
+  privacyNoticeVersion       String?
+  privacyNoticeAt            DateTime?
+  notificationConsent        Boolean            @default(false)
+  notificationConsentAt      DateTime?
+  notificationConsentVersion String?
+  notificationConsentSource  String?
+  notificationConsentScope   String?
+  optedOutAt                 DateTime?
+  lastInboundAt              DateTime           @default(now())
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
+  orders                     Order[]
+  messages                   Message[]
+  handoffs                   Handoff[]
+}
+
+model Order {
+  id                      String           @id @default(uuid())
+  publicOrderId           String           @unique
+  customerId              String
+  customer                Customer         @relation(fields: [customerId], references: [id])
+  recipientName           String?
+  recipientPhone          String?
+  city                    String?
+  address                 String?
+  productId               String
+  discId                  String?
+  discTitle               String?
+  productName             String
+  quantity                Int              @default(1)
+  unitPrice               Int
+  totalAmount             Int
+  currency                String           @default("KZT")
+  orderStatus             OrderStatus      @default(DRAFT)
+  paymentStatus           PaymentStatus    @default(NOT_CREATED)
+  paymentProvider         String?
+  externalPaymentId       String?
+  paymentUrl              String?
+  paidAt                  DateTime?
+  contentVersion          Int              @default(1)
+  version                 Int              @default(1)
+  appliedPaymentAttemptId String?
+  reviewRequired          Boolean          @default(false)
+  fulfillmentHold         Boolean          @default(false)
+  selectedDiscIds         String[]         @default([])
+  packageSnapshot         Json?
+  deliverySnapshot        Json?
+  subtotalAmount          Int              @default(20000)
+  deliveryAmount          Int              @default(0)
+  deliveryMode            String           @default("PAID_SEPARATELY")
+  configVersion           String?
+  checkoutFrozenAt        DateTime?
+  sheetSyncStatus         String           @default("NOT_REQUIRED")
+  sheetSyncedAt           DateTime?
+  sheetRowReference       String?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  paymentAttempts         PaymentAttempt[]
+
+  @@index([paymentStatus, sheetSyncStatus])
+}
+
+model PaymentAttempt {
+  id                String        @id @default(uuid())
+  orderId           String
+  order             Order         @relation(fields: [orderId], references: [id])
+  provider          String
+  merchantId        String        @default("demo")
+  merchantReference String        @unique @default(uuid())
+  orderVersion      Int           @default(1)
+  snapshot          Json?
+  paidAt            DateTime?
+  expiresAt         DateTime?
+  lastReconcileAt   DateTime?
+  providerStatus    String?
+  externalPaymentId String?
+  amount            Int
+  currency          String
+  status            PaymentStatus @default(PENDING)
+  paymentUrl        String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@unique([provider, externalPaymentId])
+  @@unique([provider, merchantId, externalPaymentId])
+  @@index([orderId, createdAt])
+}
+
+model Message {
+  id                String    @id @default(uuid())
+  customerId        String
+  customer          Customer  @relation(fields: [customerId], references: [id])
+  whatsappMessageId String?   @unique
+  direction         String
+  type              String
+  content           String?
+  payload           Json?
+  outboxJobId       String?   @unique
+  deliveryStatus    String?
+  acceptedAt        DateTime?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  failedAt          DateTime?
+  deliveryError     String?
+  ticketId          String?
+  managerId         String?
+  createdAt         DateTime  @default(now())
+
+  @@index([customerId, createdAt])
+}
+
+model WebhookEvent {
+  id              String      @id @default(uuid())
+  sequence        BigInt      @unique @default(autoincrement())
+  provider        String
+  externalEventId String
+  eventType       String
+  payload         Json
+  status          InboxStatus @default(RECEIVED)
+  payloadHash     String?
+  authenticatedAt DateTime?
+  acknowledgement Json?
+  customerId      String?
+  orderId         String?
+  attemptId       String?
+  lockToken       String?
+  lockedUntil     DateTime?
+  processedAt     DateTime?
+  attempts        Int         @default(0)
+  nextAttemptAt   DateTime    @default(now())
+  lastError       String?
+  createdAt       DateTime    @default(now())
+
+  @@unique([provider, externalEventId])
+  @@index([provider, processedAt, nextAttemptAt])
+}
+
+model OutboxJob {
+  id                String    @id @default(uuid())
+  sequence          BigInt    @unique @default(autoincrement())
+  dedupeKey         String    @unique
+  kind              String
+  customerId        String?
+  orderId           String?
+  payload           Json
+  status            JobStatus @default(PENDING)
+  lockToken         String?
+  lockedUntil       DateTime?
+  dispatchStartedAt DateTime?
+  resourceKey       String?
+  attempts          Int       @default(0)
+  nextAttemptAt     DateTime  @default(now())
+  lastError         String?
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+
+  @@index([status, nextAttemptAt, sequence])
+}
+
+model Handoff {
+  id                String             @id @default(uuid())
+  customerId        String
+  customer          Customer           @relation(fields: [customerId], references: [id])
+  reason            String
+  previousState     ConversationState?
+  assignedManagerId String?
+  status            String             @default("OPEN")
+  createdAt         DateTime           @default(now())
+  closedAt          DateTime?
+
+  @@index([status, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  event      String
+  customerId String?
+  orderId    String?
+  requestId  String?
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model BusinessSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model PaymentIncident {
+  id                String    @id @default(uuid())
+  incidentKey       String    @unique
+  orderId           String?
+  attemptId         String?
+  reason            String
+  expectedAmount    String?
+  actualAmount      String?
+  expectedCurrency  String?
+  actualCurrency    String?
+  details           Json?
+  status            String    @default("OPEN")
+  resolvedBy        String?
+  resolutionComment String?
+  resolvedAt        DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([orderId, status])
+}
+
+model SheetCursor {
+  spreadsheetId String
+  sheetId       Int
+  nextRowIndex  Int    @default(2)
+
+  @@id([spreadsheetId, sheetId])
+}
+
+model SheetBinding {
+  id                 String    @id @default(uuid())
+  orderId            String    @unique
+  spreadsheetId      String
+  sheetId            Int
+  rowIndex           Int
+  syncedOrderVersion Int       @default(0)
+  syncedAt           DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@unique([spreadsheetId, sheetId, rowIndex])
+}
+
+model TelegramMessageBinding {
+  id         String   @id @default(uuid())
+  chatId     String
+  messageId  String
+  ticketId   String
+  customerId String
+  source     String
+  createdAt  DateTime @default(now())
+
+  @@unique([chatId, messageId])
+  @@index([ticketId])
+}
+
+model ActionToken {
+  token               String    @id @default(uuid())
+  customerId          String
+  orderId             String?
+  contentVersion      Int?
+  conversationVersion Int
+  actionId            String
+  context             String?
+  consumedAt          DateTime?
+  expiresAt           DateTime
+  createdAt           DateTime  @default(now())
+
+  @@index([customerId, expiresAt])
+}
+
+model WorkerHeartbeat {
+  id         String   @id
+  lastSeenAt DateTime @default(now())
+  details    Json?
+}

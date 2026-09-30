@@ -1,0 +1,61 @@
+{
+  "name": "music-box-ai-sales-agent",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "demo": "tsx scripts/demo.ts",
+    "build": "prisma generate && tsc -p tsconfig.build.json",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "seed": "tsx scripts/seed.ts",
+    "simulate": "tsx scripts/simulate-message.ts",
+    "format": "prettier --write src scripts tests public *.json *.ts *.js",
+    "worker": "node dist/src/worker.js",
+    "worker:dev": "tsx watch src/worker.ts",
+    "check:production": "tsx scripts/check-production.ts",
+    "sheets:migrate": "tsx scripts/migrate-sheets.ts"
+  },
+  "dependencies": {
+    "@fastify/helmet": "13.1.1",
+    "@fastify/rate-limit": "11.2.0",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "dotenv": "18.0.5",
+    "fast-xml-parser": "5.11.2",
+    "fastify": "5.12.5",
+    "googleapis": "182.0.0",
+    "libphonenumber-js": "1.13.14",
+    "openai": "7.25.0",
+    "pg": "8.23.1",
+    "pino": "10.3.1",
+    "prisma": "7.10.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.6.3",
+    "@types/pg": "8.23.1",
+    "embedded-postgres": "18.4.0-beta.17",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0",
+    "vitest": "5.0.3"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2",
+    "mysql2": "3.24.5"
+  }
+}

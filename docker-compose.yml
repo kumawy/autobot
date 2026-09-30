@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:18.4-bookworm
+    environment:
+      POSTGRES_USER: musicbox
+      POSTGRES_PASSWORD: local-demo-password
+      POSTGRES_DB: musicbox
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U musicbox -d musicbox']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  app:
+    build: .
+    init: true
+    environment: &app-environment
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3000
+      APP_BASE_URL: http://localhost:3000
+      DATABASE_URL: postgresql://musicbox:local-demo-password@db:5432/musicbox
+      INTEGRATION_MODE: demo
+      PAYMENT_PROVIDER: mock
+      ADMIN_TOKEN: local-compose-admin-token-change-before-live
+      MOCK_PAYMENT_SECRET: local-compose-mock-secret-change-before-live
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      [
+        'sh',
+        '-c',
+        'node node_modules/prisma/build/index.js migrate deploy && node dist/src/server.js',
+      ]
+    restart: unless-stopped
+  worker:
+    build: .
+    init: true
+    environment: *app-environment
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ['node', 'dist/src/worker.js']
+    healthcheck:
+      test: ['CMD', 'node', 'dist/src/jobs/health.js']
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+    restart: unless-stopped
+volumes:
+  postgres-data:

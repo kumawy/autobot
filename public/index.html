@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f5f1" />
+    <meta name="description" content="Локальный симулятор AI-продавца Music Box в WhatsApp." />
+    <title>Music Box — локальный симулятор</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/simulator.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Music Box — главная">
+        <span class="brand-mark" aria-hidden="true">♫</span>
+        <span
+          ><strong>music box<span class="brand-period">.</span></strong
+          ><small>WhatsApp sales agent</small></span
+        >
+      </a>
+      <div class="environment">
+        <span class="status-dot" aria-hidden="true"></span
+        ><span
+          >Локальный симулятор<span class="environment-detail">
+            • реальные сообщения и платежи не отправляются</span
+          ></span
+        >
+      </div>
+      <span class="version">DEMO / 1.1</span>
+    </header>
+
+    <main class="workspace">
+      <aside class="left-panel" aria-label="Управление сценарием">
+        <div class="section-intro">
+          <p class="eyebrow">ПРОВЕРЬТЕ СЦЕНАРИЙ</p>
+          <h1>От первого «привет»<br />до нового заказа.</h1>
+          <p>Пройдите путь покупателя и посмотрите, как работает ваш ассистент.</p>
+        </div>
+
+        <section class="panel identity-panel" aria-labelledby="identity-heading">
+          <div class="section-heading">
+            <h2 id="identity-heading">Ваш тестовый клиент</h2>
+            <span class="micro-label">01</span>
+          </div>
+          <form id="identity-form">
+            <label class="field-label" for="phone">Номер WhatsApp</label>
+            <div class="phone-field">
+              <span aria-hidden="true">↗</span
+              ><input
+                id="phone"
+                name="phone"
+                type="tel"
+                autocomplete="off"
+                inputmode="tel"
+                value="+77070010001"
+                required
+                maxlength="18"
+                aria-describedby="identity-hint"
+              /><button
+                type="submit"
+                class="icon-button"
+                title="Открыть диалог этого клиента"
+                aria-label="Открыть диалог этого клиента"
+              >
+                →
+              </button>
+            </div>
+          </form>
+          <p id="identity-hint" class="field-hint">Каждый номер — отдельный диалог.</p>
+          <button id="new-client" type="button" class="button button-outline full-width">
+            <span aria-hidden="true">＋</span> Новый клиент
+          </button>
+        </section>
+
+        <section class="scenario-section" aria-labelledby="scenarios-heading">
+          <div class="section-heading">
+            <h2 id="scenarios-heading">С чего начнём?</h2>
+            <span class="micro-label">02</span>
+          </div>
+          <button
+            type="button"
+            class="scenario-button"
+            data-message="Сколько стоит музыкальная шкатулка?"
+          >
+            <span class="scenario-icon" aria-hidden="true">₸</span
+            ><span><strong>Узнать цену</strong><small>Первый контакт и выбор языка</small></span
+            ><span class="arrow" aria-hidden="true">↗</span>
+          </button>
+          <button type="button" class="scenario-button" data-message="Хочу посмотреть товар">
+            <span class="scenario-icon" aria-hidden="true">♫</span
+            ><span><strong>Посмотреть товар</strong><small>Знакомство со шкатулкой</small></span
+            ><span class="arrow" aria-hidden="true">↗</span>
+          </button>
+          <button
+            type="button"
+            class="scenario-button"
+            data-message="Позовите, пожалуйста, менеджера"
+          >
+            <span class="scenario-icon" aria-hidden="true">☏</span
+            ><span><strong>Позвать менеджера</strong><small>Передача диалога человеку</small></span
+            ><span class="arrow" aria-hidden="true">↗</span>
+          </button>
+        </section>
+
+        <section class="quick-data" aria-labelledby="data-heading">
+          <h2 id="data-heading">Данные для пробы</h2>
+          <p>Нажмите, чтобы вставить в сообщение.</p>
+          <div class="data-chips">
+            <button type="button" data-fill="Алия Нурланова">Алия Нурланова</button
+            ><button type="button" data-fill="+77011234567">+7 701 123 45 67</button
+            ><button type="button" data-fill="Алматы">Алматы</button
+            ><button type="button" data-fill="ул. Абая, 10, кв. 5">ул. Абая, 10, кв. 5</button
+            ><button type="button" data-fill="1">1 комплект</button>
+          </div>
+        </section>
+        <div class="sidebar-note">
+          <span aria-hidden="true">✧</span>
+          <p>Новая сессия не удаляет предыдущие заказы. Вернуться можно по номеру клиента.</p>
+        </div>
+      </aside>
+
+      <section class="chat-panel" aria-label="Диалог с ассистентом">
+        <header class="chat-header">
+          <div class="chat-avatar" aria-hidden="true">♫</div>
+          <div class="chat-contact">
+            <h2>Music Box</h2>
+            <p>
+              <span class="status-dot" aria-hidden="true"></span> Ассистент магазина
+              <span class="chat-separator">/</span> RU · KZ
+            </p>
+          </div>
+          <span class="chat-demo-label">ТЕСТОВЫЙ ЧАТ</span>
+        </header>
+        <div class="chat-session-bar">
+          <span id="chat-phone">+7 707 001 00 01</span
+          ><span id="language-label">Язык ещё не выбран</span>
+        </div>
+        <nav class="chat-shortcuts" aria-label="Навигация по диалогу">
+          <button type="button" data-message="меню">Меню</button>
+          <button type="button" data-message="назад">Назад</button>
+          <button type="button" data-message="язык">RU / KZ</button>
+          <button type="button" data-message="конфиденциальность">Данные и уведомления</button>
+        </nav>
+        <div
+          id="messages"
+          class="messages"
+          role="log"
+          aria-label="История сообщений"
+          aria-live="polite"
+          aria-relevant="additions"
+        ></div>
+        <div id="notice" class="notice" role="alert" hidden></div>
+        <form id="message-form" class="composer">
+          <label class="visually-hidden" for="message-input">Сообщение покупателя</label
+          ><textarea
+            id="message-input"
+            rows="1"
+            placeholder="Напишите от лица покупателя…"
+            maxlength="4000"
+            required
+          ></textarea
+          ><button
+            id="send-button"
+            type="submit"
+            class="send-button"
+            aria-label="Отправить сообщение"
+          >
+            <span aria-hidden="true">↑</span>
+          </button>
+        </form>
+        <div class="composer-footer">
+          <span id="status-line" role="status">Сообщения остаются в локальном приложении</span
+          ><span>Enter ↵</span>
+        </div>
+      </section>
+
+      <aside class="right-panel" aria-label="Состояние клиента и заказа">
+        <section class="panel state-panel">
+          <div class="section-heading">
+            <h2>За кулисами</h2>
+            <span id="connection-badge" class="connection-badge">Подключаемся</span>
+          </div>
+          <p class="panel-description">Состояние обновляется вместе с диалогом.</p>
+          <div class="state-card">
+            <span class="field-label">Сейчас в диалоге</span
+            ><strong id="conversation-state">Ожидаем первое сообщение</strong
+            ><span id="state-code" class="state-code">НОВЫЙ КЛИЕНТ</span>
+          </div>
+          <ol id="journey" class="journey" aria-label="Прогресс заказа">
+            <li><span>1</span>Знакомство</li>
+            <li><span>2</span>Оформление</li>
+            <li><span>3</span>Оплата</li>
+            <li><span>4</span>Подтверждение</li>
+          </ol>
+        </section>
+
+        <section class="panel order-panel">
+          <div class="section-heading">
+            <h2>Заказ</h2>
+            <span id="order-count" class="micro-label">—</span>
+          </div>
+          <div id="order-content"></div>
+        </section>
+
+        <section class="panel consent-panel" aria-label="Данные и согласие">
+          <div class="section-heading"><h2>Данные и уведомления</h2></div>
+          <p id="consent-status" class="panel-description">
+            Согласие на последующие сообщения не получено.
+          </p>
+          <p id="privacy-version" class="field-hint">Уведомление о данных ещё не показано.</p>
+          <button type="button" class="button button-outline full-width" data-message="стоп">
+            Отключить уведомления
+          </button>
+        </section>
+
+        <section
+          id="incidents-panel"
+          class="panel incidents-panel"
+          hidden
+          aria-label="Финансовые инциденты"
+        >
+          <div class="section-heading">
+            <h2>Нужна проверка</h2>
+            <span id="incidents-count" class="micro-label">0</span>
+          </div>
+          <div id="incidents-content"></div>
+        </section>
+
+        <section id="handoff-panel" class="panel handoff-panel" hidden>
+          <div class="section-heading">
+            <h2>Диалог у менеджера</h2>
+            <span aria-hidden="true">☏</span>
+          </div>
+          <p>
+            AI-ответы приостановлены. Платёжные события продолжают учитываться. Можно явно вернуться
+            к боту.
+          </p>
+          <div id="handoff-details"></div>
+          <button id="release-handoff" type="button" class="button button-outline full-width">
+            Вернуть ассистенту
+          </button>
+          <details id="telegram-demo" class="telegram-demo" hidden>
+            <summary>Симулятор ответа из Telegram</summary>
+            <p>Локальная проверка моста. Сообщения в настоящий Telegram не отправляются.</p>
+            <label class="field-label" for="demo-manager">Тестовый менеджер</label>
+            <select id="demo-manager">
+              <option value="1001">Менеджер 1001</option>
+              <option value="1002">Менеджер 1002</option>
+            </select>
+            <div class="bridge-actions">
+              <button id="ticket-claim" type="button" class="button button-outline">
+                Взять диалог
+              </button>
+              <button id="ticket-close" type="button" class="button button-outline">Закрыть</button>
+            </div>
+            <form id="telegram-reply-form">
+              <label class="field-label" for="telegram-reply">Ответ клиенту</label>
+              <textarea
+                id="telegram-reply"
+                rows="3"
+                maxlength="4000"
+                placeholder="Напишите ответ от менеджера…"
+                required
+              ></textarea>
+              <p id="telegram-binding" class="field-hint"></p>
+              <button id="telegram-send" type="submit" class="button button-outline full-width">
+                Поставить ответ в очередь
+              </button>
+            </form>
+            <p id="bridge-status" class="field-hint" role="status"></p>
+            <div id="telegram-log" class="telegram-log"></div>
+          </details>
+        </section>
+
+        <section class="panel jobs-panel">
+          <div class="section-heading">
+            <h2>Действия системы</h2>
+            <span id="jobs-count" class="micro-label">0</span>
+          </div>
+          <div id="jobs-content"></div>
+        </section>
+        <p class="inspector-note">
+          Оплату подтверждает проверенный серверный результат. Фраза «я оплатил» не меняет статус.
+          DEMO: деньги не списываются.
+        </p>
+      </aside>
+    </main>
+    <footer class="page-footer">
+      <span>MUSIC BOX / SALES WORKSPACE</span><span>Сделано для диалога. Проверено вами.</span>
+    </footer>
+  </body>
+</html>
