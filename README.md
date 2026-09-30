@@ -4,7 +4,7 @@
 
 По умолчанию `INTEGRATION_MODE=demo`: демонстрационный каталог и локальные имитации интеграций. Денежные средства не списываются, сообщения в настоящие WhatsApp и Telegram не отправляются. Демо-условия комплектации и доставки явно отмечены в `data/business.json` и не разрешают реальные платежи.
 
-Для настоящих OpenAI и тестового номера Meta добавлен `INTEGRATION_MODE=staging`: PostgreSQL остаётся источником данных, оплата — только mock, Telegram и Google Sheets отключены по умолчанию. Конфигурация и запуск описаны в [STAGING_DEPLOYMENT.md](docs/STAGING_DEPLOYMENT.md). Локальный симулятор сохраняет прежний режим.
+Для тестового номера Meta добавлен `INTEGRATION_MODE=staging`: PostgreSQL остаётся источником данных, оплата — только mock, Telegram и Google Sheets отключены по умолчанию. Конфигурация и запуск описаны в [STAGING_DEPLOYMENT.md](docs/STAGING_DEPLOYMENT.md). Настоящий OpenAI доступен также в браузере через `npm run demo:connected`, без Meta.
 
 ## Быстрый запуск
 

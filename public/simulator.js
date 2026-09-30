@@ -140,6 +140,29 @@
     );
   }
 
+  function googleSheetSynced(order) {
+    return (
+      integrations?.sheets.enabled &&
+      integrations.sheets.provider === 'google' &&
+      order?.sheetSyncStatus === 'SYNCED' &&
+      typeof order.sheetRowReference === 'string' &&
+      /^(?:'[^']+'|[A-Za-z0-9_ -]+)!A([1-9]\d*):Y\1$/.test(order.sheetRowReference)
+    );
+  }
+
+  function sheetProviderStatus(snapshot) {
+    if (!integrations?.sheets.enabled) return 'Экспорт выключен';
+    if (integrations.sheets.provider !== 'google') return 'Локальная демонстрация';
+    const confirmed =
+      snapshot?.customer &&
+      (snapshot.orders || []).some(
+        (order) => order.customerId === snapshot.customer.id && googleSheetSynced(order),
+      );
+    return confirmed
+      ? 'Google Sheets · запись заказа подтверждена'
+      : 'Google Sheets · ждём записи заказа';
+  }
+
   async function loadIntegrations() {
     try {
       const config = await request('/dev/config');
@@ -169,14 +192,7 @@
             ? `OpenAI${typeof config.ai.model === 'string' ? ` · ${config.ai.model.slice(0, 80)}` : ''}`
             : 'Демонстрационный ассистент',
         ],
-        [
-          'Таблица',
-          !config.sheets.enabled
-            ? 'Экспорт выключен'
-            : google
-              ? 'Google Sheets · ждём записи заказа'
-              : 'Локальная демонстрация',
-        ],
+        ['Таблица', sheetProviderStatus(lastSnapshot)],
         [
           'WhatsApp',
           config.whatsapp.provider === 'demo' ? 'Симулятор, без отправки' : 'Реальный API Meta',
@@ -189,8 +205,11 @@
               ? 'Локальная демонстрация'
               : 'Через Telegram',
         ],
-      ])
-        details.append(element('dt', '', label), element('dd', '', value));
+      ]) {
+        const detail = element('dd', '', value);
+        if (label === 'Таблица') detail.id = 'integration-sheet-status';
+        details.append(element('dt', '', label), detail);
+      }
       $('#integration-privacy').textContent =
         config.ai.provider === 'openai' || google
           ? 'Для проверки используйте вымышленные данные. Выбранные сервисы получают вопросы или данные заказа.'
@@ -601,7 +620,7 @@
       if (order.sheetSyncStatus === 'SYNCED' && demoRecord) {
         title = 'Проверено локально';
         detail = 'Этот заказ сохранён в демо-отчёте. Запись в Google Sheets не подтверждена.';
-      } else if (order.sheetSyncStatus === 'SYNCED' && google) {
+      } else if (googleSheetSynced(order)) {
         title = 'Заказ записан в Google Sheets';
         detail = 'Успешная запись подтверждена для этого заказа.';
         state = 'synced';
@@ -815,6 +834,8 @@
     if (!snapshot || !Array.isArray(snapshot.messages))
       throw new Error('Сервер вернул неожиданный формат данных.');
     lastSnapshot = snapshot;
+    const sheetStatus = $('#integration-sheet-status');
+    if (sheetStatus) sheetStatus.textContent = sheetProviderStatus(snapshot);
     const nextMessages = JSON.stringify(snapshot.messages);
     if (nextMessages !== messagesSignature) {
       const wasNearBottom =
