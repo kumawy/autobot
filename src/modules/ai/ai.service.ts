@@ -220,9 +220,14 @@ export class OpenAiService implements AiService {
     this.maxTools = options.maxTools ?? 4;
     if (!Number.isSafeInteger(this.maxTools) || this.maxTools < 1 || this.maxTools > 20)
       throw new Error('AI maxTools must be 1–20');
-    if (this.timeoutMs < 1 || this.timeoutMs > 60_000)
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 60_000)
       throw new Error('AI timeout must be 1–60000 ms');
-    this.client = new OpenAI({ apiKey: options.apiKey, timeout: this.timeoutMs, maxRetries: 0 });
+    this.client = new OpenAI({
+      apiKey: options.apiKey,
+      timeout: this.timeoutMs,
+      maxRetries: 0,
+      logLevel: 'off',
+    });
     this.model = options.model;
     this.catalog = options.catalog;
   }

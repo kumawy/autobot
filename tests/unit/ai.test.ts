@@ -130,6 +130,21 @@ describe('AI privilege boundary and prompt', () => {
 });
 
 describe('Responses API adapter without live credentials', () => {
+  it('rejects missing configuration and invalid timeout before making any request', () => {
+    expect(() => new OpenAiService({ apiKey: ' ', model: 'configured-model', catalog })).toThrow(
+      'key and model',
+    );
+    expect(() => new OpenAiService({ apiKey: 'test-only', model: '', catalog })).toThrow(
+      'key and model',
+    );
+    for (const timeoutMs of [NaN, Infinity, 1.5, 0, 60001]) {
+      expect(
+        () =>
+          new OpenAiService({ apiKey: 'test-only', model: 'configured-model', catalog, timeoutMs }),
+      ).toThrow('AI timeout');
+    }
+    expect(sdk.create).not.toHaveBeenCalled();
+  });
   it('respects the configured tool limit while allowing one final text response', async () => {
     sdk.create.mockResolvedValue(toolCall('get_product_info'));
     const limited = new OpenAiService({

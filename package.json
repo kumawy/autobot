@@ -26,7 +26,8 @@
     "check:production": "tsx scripts/check-production.ts",
     "sheets:migrate": "tsx scripts/migrate-sheets.ts",
     "db:validate": "prisma validate",
-    "db:check": "tsx scripts/check-database.ts"
+    "db:check": "tsx scripts/check-database.ts",
+    "test:openai": "tsx scripts/test-openai.ts"
   },
   "dependencies": {
     "@fastify/helmet": "13.1.1",
