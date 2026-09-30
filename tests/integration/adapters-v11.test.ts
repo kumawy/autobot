@@ -106,7 +106,7 @@ beforeAll(async () => {
   await promisify(execFile)(
     process.execPath,
     ['node_modules/prisma/build/index.js', 'migrate', 'deploy'],
-    { env: { ...process.env, DATABASE_URL: url }, timeout: 60000 },
+    { env: { ...process.env, DIRECT_URL: '', DATABASE_URL: url }, timeout: 60000 },
   );
   db = createDatabase(url);
 });

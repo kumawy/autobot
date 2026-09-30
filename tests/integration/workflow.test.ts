@@ -91,10 +91,13 @@ beforeAll(async () => {
   await promisify(execFile)(
     process.execPath,
     ['node_modules/prisma/build/index.js', 'migrate', 'deploy'],
-    { cwd: process.cwd(), env: { ...process.env, DATABASE_URL: url }, timeout: 60000 },
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, DIRECT_URL: '', DATABASE_URL: url },
+      timeout: 60000,
+    },
   );
   env = readEnv({
-    ...process.env,
     NODE_ENV: 'test',
     DATABASE_URL: url,
     INTEGRATION_MODE: 'demo',

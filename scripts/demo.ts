@@ -55,7 +55,10 @@ function cleanup(): Promise<void> {
 }
 async function run(args: string[]) {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, args, { stdio: 'inherit', env: process.env });
+    const child = spawn(process.execPath, args, {
+      stdio: 'inherit',
+      env: { ...process.env, DIRECT_URL: dbUrl },
+    });
     child.on('error', reject);
     child.on('exit', (code) =>
       code === 0 ? resolve() : reject(new Error(`Command failed (${code})`)),

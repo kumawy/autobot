@@ -24,7 +24,9 @@
     "worker": "node dist/src/worker.js",
     "worker:dev": "tsx watch src/worker.ts",
     "check:production": "tsx scripts/check-production.ts",
-    "sheets:migrate": "tsx scripts/migrate-sheets.ts"
+    "sheets:migrate": "tsx scripts/migrate-sheets.ts",
+    "db:validate": "prisma validate",
+    "db:check": "tsx scripts/check-database.ts"
   },
   "dependencies": {
     "@fastify/helmet": "13.1.1",

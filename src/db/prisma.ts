@@ -1,14 +1,10 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { databasePoolConfig } from './connection.js';
 export type Tx = Prisma.TransactionClient;
 export function createDatabase(url: string) {
   return new PrismaClient({
-    adapter: new PrismaPg({
-      connectionString: url,
-      connectionTimeoutMillis: 5000,
-      max: 10,
-      options: '-c timezone=UTC',
-    }),
+    adapter: new PrismaPg(databasePoolConfig(url)),
   });
 }
 export const json = (value: unknown): Prisma.InputJsonValue =>
