@@ -3,14 +3,39 @@ import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import EmbeddedPostgres from 'embedded-postgres';
 import { config } from 'dotenv';
-const dbUrl = 'postgresql://musicbox:musicbox@127.0.0.1:55432/musicbox';
-if (!existsSync('.env')) {
-  const content = readFileSync('.env.example', 'utf8')
+const connected = process.argv.includes('--connected');
+const envFile = connected ? '.env.connected.local' : '.env';
+const postgresPort = connected ? 55433 : 55432;
+const databaseDir = connected ? '.local/postgres-connected' : '.local/postgres';
+const dbUrl = `postgresql://musicbox:musicbox@127.0.0.1:${postgresPort}/musicbox`;
+if (!existsSync(envFile)) {
+  let content = readFileSync('.env.example', 'utf8')
     .replace('local-change-this-token-before-deployment', randomBytes(32).toString('hex'))
     .replace('local-change-this-mock-secret-before-deployment', randomBytes(32).toString('hex'));
-  writeFileSync('.env', content, { mode: 0o600 });
+  if (connected) {
+    const overrides: Record<string, string> = {
+      PORT: '3001',
+      APP_BASE_URL: 'http://localhost:3001',
+      DATABASE_URL: dbUrl,
+      AI_PROVIDER: 'openai',
+      OPENAI_MODEL: 'gpt-4.1-mini',
+      GOOGLE_SHEETS_PROVIDER: 'google',
+      GOOGLE_SHEETS_ENABLED: 'false',
+      TELEGRAM_ENABLED: 'false',
+      MANAGER_HANDOFF_ENABLED: 'false',
+      BUSINESS_NAME: 'Sandargift',
+    };
+    for (const [key, value] of Object.entries(overrides)) {
+      const pattern = new RegExp(`^${key}=.*$`, 'm');
+      content = pattern.test(content)
+        ? content.replace(pattern, `${key}=${value}`)
+        : `${content}\n${key}=${value}\n`;
+    }
+  }
+  writeFileSync(envFile, content, { mode: 0o600 });
 }
-config({ quiet: true });
+process.env.DOTENV_CONFIG_PATH = envFile;
+config({ path: envFile, quiet: true });
 if (
   process.env.NODE_ENV === 'production' ||
   process.env.INTEGRATION_MODE !== 'demo' ||
@@ -19,14 +44,21 @@ if (
   throw new Error('npm run demo requires development + demo + mock');
 if (process.env.DATABASE_URL !== dbUrl)
   throw new Error(
-    'npm run demo manages only local PostgreSQL on port 55432. Use npm run dev for your own database.',
+    `This demo manages only local PostgreSQL on port ${postgresPort}. Use npm run dev for your own database.`,
   );
+if (connected && (process.env.AI_PROVIDER !== 'openai' || !process.env.OPENAI_API_KEY?.trim()))
+  throw new Error(
+    'Set OPENAI_API_KEY in .env.connected.local, then run npm run demo:connected again.',
+  );
+// Validate all selected integrations before starting PostgreSQL or writing demo data.
+const { readEnv } = await import('../src/config/env.js');
+readEnv();
 mkdirSync('.local', { recursive: true });
 const pg = new EmbeddedPostgres({
-  databaseDir: '.local/postgres',
+  databaseDir,
   user: 'musicbox',
   password: 'musicbox',
-  port: 55432,
+  port: postgresPort,
   persistent: true,
   authMethod: 'scram-sha-256',
   postgresFlags: ['-h', '127.0.0.1'],
@@ -66,7 +98,7 @@ async function run(args: string[]) {
   });
 }
 try {
-  if (!existsSync('.local/postgres/PG_VERSION')) await pg.initialise();
+  if (!existsSync(`${databaseDir}/PG_VERSION`)) await pg.initialise();
   await pg.start();
   const client = pg.getPgClient();
   await client.connect();

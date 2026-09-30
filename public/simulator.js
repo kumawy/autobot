@@ -88,6 +88,8 @@
   let messagesSignature = '';
   let inspectorSignature = '';
   let bridgeState = null;
+  let integrations = null;
+  let lastSnapshot = null;
 
   function element(tag, className = '', text) {
     const result = document.createElement(tag);
@@ -105,6 +107,118 @@
     } catch {
       return null;
     }
+  }
+
+  function googleSheetUrl(value) {
+    const url = safeUrl(value);
+    return url?.protocol === 'https:' &&
+      url.hostname === 'docs.google.com' &&
+      /^\/spreadsheets\/d\/[a-zA-Z0-9_-]+(?:\/|$)/.test(url.pathname)
+      ? url
+      : null;
+  }
+
+  function idleStatus() {
+    if (!integrations) return 'Режим обработки сообщений не подтверждён';
+    const external = [];
+    if (integrations.ai.provider === 'openai') external.push('Вопросы — в OpenAI');
+    if (integrations.sheets.enabled && integrations.sheets.provider === 'google')
+      external.push('заказы — в Google Sheets');
+    if (integrations.whatsapp.provider === 'meta') external.push('сообщения — в WhatsApp');
+    if (integrations.telegram.enabled && integrations.telegram.provider === 'telegram')
+      external.push('уведомления — в Telegram');
+    return external.length
+      ? external.join(' · ')
+      : 'Сообщения и заказы остаются в локальном приложении';
+  }
+
+  function bridgeEnabled() {
+    return (
+      integrations?.managerHandoffEnabled === true &&
+      integrations?.telegram.enabled === true &&
+      integrations?.telegram.provider === 'demo'
+    );
+  }
+
+  async function loadIntegrations() {
+    try {
+      const config = await request('/dev/config');
+      if (
+        !['demo', 'openai'].includes(config?.ai?.provider) ||
+        !['demo', 'google'].includes(config?.sheets?.provider) ||
+        !['demo', 'meta'].includes(config?.whatsapp?.provider) ||
+        !['demo', 'telegram'].includes(config?.telegram?.provider) ||
+        typeof config.sheets.enabled !== 'boolean' ||
+        typeof config.telegram.enabled !== 'boolean' ||
+        typeof config.managerHandoffEnabled !== 'boolean' ||
+        !['mock', 'freedompay'].includes(config.paymentProvider)
+      )
+        throw new Error('Invalid integration configuration');
+      integrations = config;
+      const google = config.sheets.enabled && config.sheets.provider === 'google';
+      $('#integration-summary').textContent =
+        `Ответы — ${config.ai.provider === 'openai' ? 'OpenAI' : 'демо'} · заказы — ${google ? 'Google Sheets' : 'локально'} · оплата — ${config.paymentProvider === 'mock' ? 'тестовая' : 'Freedom Pay'}`;
+      $('#integration-state').textContent =
+        'Настройки загружены. Доступ к сервисам проверяется при работе.';
+      const details = $('#integration-details');
+      details.replaceChildren();
+      for (const [label, value] of [
+        [
+          'Ответы',
+          config.ai.provider === 'openai'
+            ? `OpenAI${typeof config.ai.model === 'string' ? ` · ${config.ai.model.slice(0, 80)}` : ''}`
+            : 'Демонстрационный ассистент',
+        ],
+        [
+          'Таблица',
+          !config.sheets.enabled
+            ? 'Экспорт выключен'
+            : google
+              ? 'Google Sheets · ждём записи заказа'
+              : 'Локальная демонстрация',
+        ],
+        [
+          'WhatsApp',
+          config.whatsapp.provider === 'demo' ? 'Симулятор, без отправки' : 'Реальный API Meta',
+        ],
+        [
+          'Менеджер',
+          !config.managerHandoffEnabled
+            ? 'Передача выключена'
+            : config.telegram.provider === 'demo'
+              ? 'Локальная демонстрация'
+              : 'Через Telegram',
+        ],
+      ])
+        details.append(element('dt', '', label), element('dd', '', value));
+      $('#integration-privacy').textContent =
+        config.ai.provider === 'openai' || google
+          ? 'Для проверки используйте вымышленные данные. Выбранные сервисы получают вопросы или данные заказа.'
+          : 'Внешние сервисы отвечают только в явно включённом режиме.';
+      const sheet = googleSheetUrl(config.sheets.url);
+      const link = $('#google-sheet-link');
+      link.hidden = config.sheets.provider !== 'google' || !sheet;
+      if (sheet && config.sheets.provider === 'google') link.href = sheet.href;
+      else link.removeAttribute('href');
+      $('#manager-scenario').hidden = !config.managerHandoffEnabled;
+      $('#payment-note').textContent =
+        `Оплату подтверждает проверенный серверный результат. Фраза «я оплатил» не меняет статус.${config.paymentProvider === 'mock' ? ' Демо: деньги не списываются.' : ''}`;
+    } catch {
+      integrations = null;
+      $('#integration-summary').textContent = 'Режим сервисов не подтверждён';
+      $('#integration-state').textContent =
+        'Не удалось загрузить настройки. Обновите страницу перед проверкой подключений.';
+      $('#integration-details').replaceChildren();
+      $('#integration-privacy').textContent =
+        'Не считайте этот режим полностью локальным, пока настройки недоступны.';
+      $('#google-sheet-link').hidden = true;
+      $('#google-sheet-link').removeAttribute('href');
+      $('#manager-scenario').hidden = true;
+    }
+    if (!busy) $('#status-line').textContent = idleStatus();
+    inspectorSignature = '';
+    if (lastSnapshot) render(lastSnapshot);
+    updateBridgeAvailability();
   }
 
   function textWithLinks(target, value) {
@@ -135,7 +249,7 @@
 
   function setConnection(connected) {
     const badge = $('#connection-badge');
-    badge.textContent = connected ? 'На связи' : 'Нет связи';
+    badge.textContent = connected ? 'Сервер на связи' : 'Нет связи';
     badge.classList.toggle('offline', !connected);
   }
 
@@ -150,9 +264,7 @@
       });
     phoneInput.disabled = value;
     updateBridgeAvailability();
-    $('#status-line').textContent = value
-      ? 'Ассистент обрабатывает сообщение…'
-      : 'Сообщения остаются в локальном приложении';
+    $('#status-line').textContent = value ? 'Ассистент обрабатывает сообщение…' : idleStatus();
   }
 
   async function request(path, payload) {
@@ -479,6 +591,44 @@
       );
     }
     container.append(element('p', 'total-caption', 'Сумма выше — сумма по платёжной ссылке.'));
+    if (['PAID', 'REFUNDED', 'REFUND_PENDING'].includes(order.paymentStatus)) {
+      const sync = element('div', 'sheet-sync');
+      const demoRecord = String(order.sheetRowReference || '').startsWith('demo:');
+      const google = integrations?.sheets.enabled && integrations?.sheets.provider === 'google';
+      let title = 'Запись заказа';
+      let detail;
+      let state = 'pending';
+      if (order.sheetSyncStatus === 'SYNCED' && demoRecord) {
+        title = 'Проверено локально';
+        detail = 'Этот заказ сохранён в демо-отчёте. Запись в Google Sheets не подтверждена.';
+      } else if (order.sheetSyncStatus === 'SYNCED' && google) {
+        title = 'Заказ записан в Google Sheets';
+        detail = 'Успешная запись подтверждена для этого заказа.';
+        state = 'synced';
+      } else if (!integrations) {
+        detail = 'Настройки таблицы недоступны. Заказ сохранён в приложении.';
+      } else if (!integrations.sheets.enabled) {
+        title = 'Экспорт выключен';
+        detail = 'Заказ сохранён в приложении. Отправка в таблицу отключена.';
+      } else if (
+        ['BLOCKED', 'FAILED', 'ERROR', 'LEGACY_RECONCILIATION_REQUIRED'].includes(
+          order.sheetSyncStatus,
+        )
+      ) {
+        title = 'Запись в таблицу требует проверки';
+        detail = 'Заказ и оплата сохранены. Проверьте подключение и доступ к таблице.';
+        state = 'blocked';
+      } else if (order.sheetSyncStatus === 'SYNCED') {
+        title = 'Запись отмечена в отчёте';
+        detail = 'Текущий режим не подтверждает подключение к Google Sheets.';
+      } else {
+        title = google ? 'Ожидает записи в Google Sheets' : 'Ожидает записи в демо-отчёт';
+        detail = 'Заказ и оплата сохранены. Статус обновится после обработки.';
+      }
+      sync.classList.add(state);
+      sync.append(element('strong', '', title), element('p', '', detail));
+      container.append(sync);
+    }
 
     const attempt = Array.isArray(order.paymentAttempts)
       ? order.paymentAttempts.find((item) => item.status === 'PENDING' && item.provider === 'mock')
@@ -548,10 +698,11 @@
     const ticket = bridgeState?.ticket;
     const actor = $('#demo-manager').value;
     const assigned = ticket?.status === 'ASSIGNED' && String(ticket.assignedManagerId) === actor;
-    $('#ticket-claim').disabled = busy || !ticket || ticket.status !== 'OPEN';
-    $('#ticket-close').disabled = busy || !assigned;
-    $('#telegram-send').disabled = busy || !assigned || !bridgeState?.binding;
-    $('#demo-manager').disabled = busy;
+    const enabled = bridgeEnabled();
+    $('#ticket-claim').disabled = busy || !enabled || !ticket || ticket.status !== 'OPEN';
+    $('#ticket-close').disabled = busy || !enabled || !assigned;
+    $('#telegram-send').disabled = busy || !enabled || !assigned || !bridgeState?.binding;
+    $('#demo-manager').disabled = busy || !enabled;
   }
 
   function renderBridge(snapshot) {
@@ -564,7 +715,8 @@
       $('#telegram-reply').value = '';
     }
     bridgeState = { ticket, binding };
-    $('#telegram-demo').hidden = !ticket || !Array.isArray(snapshot.demoManagers);
+    $('#telegram-demo').hidden =
+      !bridgeEnabled() || !ticket || !Array.isArray(snapshot.demoManagers);
     $('#telegram-binding').textContent = binding
       ? `Reply связан с сообщением ${binding.messageId} текущего обращения.`
       : 'Ждём создания связи с сообщением менеджеру.';
@@ -592,7 +744,7 @@
   }
 
   async function telegramAction(kind) {
-    if (busy || !bridgeState?.ticket) return;
+    if (busy || !bridgeEnabled() || !bridgeState?.ticket) return;
     const ticket = bridgeState.ticket;
     const reply = $('#telegram-reply').value.trim();
     if (kind === 'reply' && (!reply || !bridgeState.binding)) return;
@@ -662,6 +814,7 @@
   function render(snapshot, scroll = false) {
     if (!snapshot || !Array.isArray(snapshot.messages))
       throw new Error('Сервер вернул неожиданный формат данных.');
+    lastSnapshot = snapshot;
     const nextMessages = JSON.stringify(snapshot.messages);
     if (nextMessages !== messagesSignature) {
       const wasNearBottom =
@@ -701,6 +854,7 @@
       snapshot.telegramBindings,
       snapshot.telegramMessages,
       snapshot.demoManagers,
+      integrations,
     ]);
     if (nextInspector === inspectorSignature) return;
     inspectorSignature = nextInspector;
@@ -758,6 +912,10 @@
         item.classList.toggle('complete', index + 1 < stage);
       });
     $('#handoff-panel').hidden = customer?.conversationState !== 'HUMAN_HANDOFF';
+    $('#handoff-description').textContent =
+      integrations?.managerHandoffEnabled === false
+        ? 'Передача менеджеру выключена. Продолжите с ассистентом — данные заказа сохранятся.'
+        : 'AI-ответы приостановлены. Платёжные события продолжают учитываться. Можно явно вернуться к боту.';
     renderBridge(snapshot);
   }
 
@@ -840,4 +998,5 @@
     if (!busy && document.visibilityState === 'visible') void refresh(true);
   });
   changeIdentity(from);
+  void loadIntegrations();
 })();

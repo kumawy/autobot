@@ -23,6 +23,8 @@ npm run demo
 
 В симуляторе можно пройти заказ до тестовой оплаты, увидеть состояния очереди и финансовые инциденты, переключить клиента, запросить менеджера и проверить Telegram Reply от демонстрационных менеджеров 1001/1002.
 
+Для браузерного показа с **настоящим OpenAI и Google Sheets** используйте `npm run demo:connected` и [инструкцию подключения](docs/CONNECTED_DEMO.md). Этот режим работает на `http://localhost:3001`, хранит заказы в отдельной локальной PostgreSQL и не требует аккаунтов WhatsApp/Telegram. Обычный `npm run demo` по-прежнему использует локальные имитации.
+
 ## Что реализовано
 
 - RU/KK wizard, выбор дисков и комплектации, отдельная стоимость доставки, версия уведомления о данных и отдельное согласие на инициативные сообщения.
@@ -40,6 +42,8 @@ npm run demo
 ```sh
 npm run check            # TypeScript, ESLint, unit + реальные PostgreSQL-тесты
 npm run build
+npm run demo:connected   # Браузер + настоящий OpenAI, отдельная локальная база
+npm run sheets:setup     # Подготовка Orders; сначала указать DOTENV_CONFIG_PATH
 npm run check:production # Проверка настроек/доступа; в demo ожидается exit 1
 npm run db:migrate
 npm run db:validate      # Проверка Prisma schema

@@ -4,6 +4,7 @@ import { createDatabase } from '../src/db/prisma.js';
 import { loadBusinessData, businessGateReport } from '../src/config/business.config.js';
 import { CatalogService } from '../src/modules/knowledge/catalog.service.js';
 import { GoogleSheetsService } from '../src/modules/sheets/google-sheets.service.js';
+import { loadGoogleSheetsCredentials } from '../src/modules/sheets/credentials.js';
 import { parseTemplateRegistry } from '../src/modules/whatsapp/policy.js';
 type Status =
   | 'OK'
@@ -33,24 +34,43 @@ const required = [
   'FREEDOMPAY_MERCHANT_ID',
   'FREEDOMPAY_SECRET_KEY',
   'GOOGLE_SHEETS_SPREADSHEET_ID',
-  'GOOGLE_SERVICE_ACCOUNT_EMAIL',
-  'GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_MANAGER_CHAT_ID',
   'TELEGRAM_ALLOWED_MANAGER_IDS',
   'TELEGRAM_WEBHOOK_SECRET',
 ];
 for (const key of required) if (!raw[key]) add(key, 'MISSING_CONFIGURATION', 'Not configured');
+let sheetsCredentials: ReturnType<typeof loadGoogleSheetsCredentials> | undefined;
+if (
+  raw.GOOGLE_APPLICATION_CREDENTIALS?.trim() ||
+  (raw.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim() && raw.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim())
+) {
+  try {
+    sheetsCredentials = loadGoogleSheetsCredentials(raw);
+  } catch {
+    add('google-credentials', 'INVALID_CONFIGURATION', 'Google credentials could not be loaded');
+  }
+} else {
+  add(
+    'google-credentials',
+    'MISSING_CONFIGURATION',
+    'Configure a service-account file or service-account email and private key',
+  );
+}
 if (
   raw.NODE_ENV !== 'production' ||
   raw.INTEGRATION_MODE !== 'live' ||
   raw.PAYMENT_PROVIDER !== 'freedompay' ||
-  raw.FREEDOMPAY_TEST_MODE !== 'false'
+  raw.FREEDOMPAY_TEST_MODE !== 'false' ||
+  (raw.AI_PROVIDER && raw.AI_PROVIDER !== 'openai') ||
+  (raw.GOOGLE_SHEETS_ENABLED !== 'false' &&
+    raw.GOOGLE_SHEETS_PROVIDER &&
+    raw.GOOGLE_SHEETS_PROVIDER !== 'google')
 )
   add(
     'runtime',
     'INVALID_CONFIGURATION',
-    'Production requires live integrations, Freedom Pay and test mode disabled',
+    'Production requires real providers, live integrations, Freedom Pay and test mode disabled',
   );
 for (const key of ['APP_BASE_URL', 'FREEDOMPAY_BASE_URL'])
   if (!raw[key]?.startsWith('https://')) add(key, 'INVALID_CONFIGURATION', 'HTTPS required');
@@ -102,19 +122,14 @@ if (env && raw.DATABASE_URL) {
   try {
     await db.$queryRaw`SELECT 1`;
     add('database', 'OK', 'Connected');
-    if (
-      raw.GOOGLE_SHEETS_SPREADSHEET_ID &&
-      raw.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
-      raw.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
-    ) {
+    if (raw.GOOGLE_SHEETS_SPREADSHEET_ID && sheetsCredentials) {
       try {
         const sheets = new GoogleSheetsService({
           db,
           spreadsheetId: env.GOOGLE_SHEETS_SPREADSHEET_ID,
           sheetId: env.GOOGLE_SHEETS_SHEET_ID,
           range: env.GOOGLE_SHEETS_RANGE,
-          serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-          privateKey: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY,
+          ...sheetsCredentials,
         });
         const result = await sheets.checkSetup();
         add(

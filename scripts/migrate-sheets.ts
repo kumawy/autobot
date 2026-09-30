@@ -4,21 +4,21 @@ import { google } from 'googleapis';
 import { readEnv } from '../src/config/env.js';
 import { createDatabase } from '../src/db/prisma.js';
 import { migrateLegacySheetRows } from '../src/modules/sheets/legacy-migration.js';
+import {
+  GoogleSheetsCredentialsError,
+  loadGoogleSheetsCredentials,
+} from '../src/modules/sheets/credentials.js';
 
 const env = readEnv();
 const db = createDatabase(env.DATABASE_URL);
 try {
-  if (
-    !env.GOOGLE_SHEETS_SPREADSHEET_ID ||
-    !env.GOOGLE_SERVICE_ACCOUNT_EMAIL ||
-    !env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
-  )
-    throw new Error('Configure Sheets credentials first');
+  if (!env.GOOGLE_SHEETS_SPREADSHEET_ID.trim()) throw new Error('Configure Sheets first');
+  const credentials = loadGoogleSheetsCredentials(env);
   const api = google.sheets({
     version: 'v4',
     auth: new google.auth.JWT({
-      email: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      key: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      email: credentials.serviceAccountEmail,
+      key: credentials.privateKey,
       scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
     }),
   });
@@ -67,6 +67,13 @@ try {
     }),
   );
   if (report.conflicts.length) process.exitCode = 1;
+} catch (error) {
+  console.error(
+    JSON.stringify({
+      error: error instanceof GoogleSheetsCredentialsError ? error.code : 'SHEET_MIGRATION_FAILED',
+    }),
+  );
+  process.exitCode = 1;
 } finally {
   await db.$disconnect();
 }

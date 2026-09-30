@@ -35,6 +35,7 @@ const schema = z.object({
   WHATSAPP_PAID_TEMPLATE: optional,
   WHATSAPP_WINDOW_SAFETY_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   WHATSAPP_TEMPLATE_REGISTRY: z.string().default('{}'),
+  AI_PROVIDER: z.enum(['demo', 'openai']),
   OPENAI_API_KEY: optional,
   OPENAI_MODEL: optional,
   FREEDOMPAY_MERCHANT_ID: optional,
@@ -43,9 +44,12 @@ const schema = z.object({
   FREEDOMPAY_TEST_MODE: flag(true),
   GOOGLE_SHEETS_SPREADSHEET_ID: optional,
   GOOGLE_SHEETS_ENABLED: flag(false),
+  GOOGLE_SHEETS_PROVIDER: z.enum(['demo', 'google']),
   GOOGLE_SHEETS_RANGE: z.string().default('Orders!A:Y'),
+  GOOGLE_APPLICATION_CREDENTIALS: optional,
   GOOGLE_SERVICE_ACCOUNT_EMAIL: optional,
   GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: optional,
+  GOOGLE_SHEETS_OWNER_EMAIL: optional,
   GOOGLE_SHEETS_SHEET_ID: z.coerce.number().int().nonnegative().default(0),
   TELEGRAM_BOT_TOKEN: optional,
   TELEGRAM_ENABLED: flag(false),
@@ -81,8 +85,10 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
   );
   const env = schema.parse({
     ...input,
+    AI_PROVIDER: input.AI_PROVIDER || (mode === 'demo' ? 'demo' : 'openai'),
     DEV_ROUTES_ENABLED: configured('DEV_ROUTES_ENABLED', mode === 'demo'),
     GOOGLE_SHEETS_ENABLED: configured('GOOGLE_SHEETS_ENABLED', mode !== 'staging'),
+    GOOGLE_SHEETS_PROVIDER: input.GOOGLE_SHEETS_PROVIDER || (mode === 'demo' ? 'demo' : 'google'),
     TELEGRAM_ENABLED: telegramEnabled,
     MANAGER_HANDOFF_ENABLED: configured('MANAGER_HANDOFF_ENABLED', telegramEnabled === 'true'),
     TELEGRAM_ALLOWED_MANAGER_IDS:
@@ -98,19 +104,10 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
       'WHATSAPP_VERIFY_TOKEN',
       'WHATSAPP_APP_SECRET',
       'WHATSAPP_GRAPH_API_VERSION',
-      'OPENAI_API_KEY',
-      'OPENAI_MODEL',
     ] as const)
       if (!env[key].trim()) throw new Error(`Missing ${key} for live integrations`);
     if (!/^v\d+\.\d+$/.test(env.WHATSAPP_GRAPH_API_VERSION))
       throw new Error('Invalid WHATSAPP_GRAPH_API_VERSION');
-    if (env.GOOGLE_SHEETS_ENABLED)
-      for (const key of [
-        'GOOGLE_SHEETS_SPREADSHEET_ID',
-        'GOOGLE_SERVICE_ACCOUNT_EMAIL',
-        'GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY',
-      ] as const)
-        if (!env[key].trim()) throw new Error(`Missing ${key} for enabled Google Sheets`);
     if (env.TELEGRAM_ENABLED)
       for (const key of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_MANAGER_CHAT_ID'] as const)
         if (!env[key].trim()) throw new Error(`Missing ${key} for enabled Telegram`);
@@ -126,6 +123,19 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
         throw new Error('Manager handoff requires Telegram manager IDs and webhook secret');
       env.TELEGRAM_ALLOWED_MANAGER_IDS = managers.join(',');
     }
+  }
+  if (env.AI_PROVIDER === 'openai')
+    for (const key of ['OPENAI_API_KEY', 'OPENAI_MODEL'] as const)
+      if (!env[key].trim()) throw new Error(`Missing ${key} for OpenAI provider`);
+  if (env.GOOGLE_SHEETS_ENABLED && env.GOOGLE_SHEETS_PROVIDER === 'google') {
+    if (!env.GOOGLE_SHEETS_SPREADSHEET_ID.trim())
+      throw new Error('Missing GOOGLE_SHEETS_SPREADSHEET_ID for enabled Google Sheets');
+    if (!env.GOOGLE_APPLICATION_CREDENTIALS.trim())
+      for (const key of [
+        'GOOGLE_SERVICE_ACCOUNT_EMAIL',
+        'GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY',
+      ] as const)
+        if (!env[key].trim()) throw new Error(`Missing ${key} for enabled Google Sheets`);
   }
   if (env.MANAGER_HANDOFF_ENABLED && !env.TELEGRAM_ENABLED)
     throw new Error('Manager handoff requires enabled Telegram');
@@ -159,6 +169,9 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
       env.FREEDOMPAY_TEST_MODE
     )
       throw new Error('Production requires live integrations and real Freedom Pay');
+    if (env.AI_PROVIDER !== 'openai') throw new Error('Production requires the OpenAI provider');
+    if (env.GOOGLE_SHEETS_ENABLED && env.GOOGLE_SHEETS_PROVIDER !== 'google')
+      throw new Error('Production requires the Google provider for enabled Sheets');
     if (input.DEV_ROUTES_ENABLED === 'true')
       throw new Error('Development routes are forbidden in production');
     env.DEV_ROUTES_ENABLED = false;

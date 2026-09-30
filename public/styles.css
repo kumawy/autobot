@@ -681,6 +681,54 @@ h1 {
   background: #fbeee4;
   color: #b4815f;
 }
+.integration-details {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 10px;
+  line-height: 1.6;
+}
+.integration-details dt {
+  color: var(--muted);
+}
+.integration-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.integration-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: 11px;
+  text-underline-offset: 3px;
+}
+.integration-link[hidden],
+#manager-scenario[hidden] {
+  display: none;
+}
+.sheet-sync {
+  padding: 12px;
+  margin-top: 14px;
+  border: 1px solid #e7ecdf;
+  border-radius: 10px;
+  background: #f6f8f1;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.sheet-sync p {
+  color: var(--muted);
+  margin: 5px 0 0;
+  font-size: 10px;
+}
+.sheet-sync.synced {
+  border-color: #cddcbd;
+  background: #f1f6e9;
+}
+.sheet-sync.blocked {
+  border-color: #e8d4c5;
+  background: #faf1e9;
+}
 .state-card {
   background: #f6f8f1;
   border: 1px solid #e7ecdf;

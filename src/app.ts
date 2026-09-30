@@ -31,6 +31,7 @@ import {
   DemoSheetsService,
   type SheetsService,
 } from './modules/sheets/google-sheets.service.js';
+import { loadGoogleSheetsCredentials } from './modules/sheets/credentials.js';
 import {
   TelegramService,
   DemoNotificationService,
@@ -187,7 +188,7 @@ export async function buildApp(options: AppOptions = {}) {
   const business = loadBusinessData({ tolerant: true });
   const ai =
     options.ai ??
-    (env.INTEGRATION_MODE === 'demo'
+    (env.AI_PROVIDER === 'demo'
       ? new DemoAiService({ catalog })
       : new OpenAiService({
           catalog,
@@ -224,15 +225,14 @@ export async function buildApp(options: AppOptions = {}) {
         }));
   const sheets =
     options.sheets ??
-    (!env.GOOGLE_SHEETS_ENABLED || env.INTEGRATION_MODE === 'demo'
+    (!env.GOOGLE_SHEETS_ENABLED || env.GOOGLE_SHEETS_PROVIDER === 'demo'
       ? new DemoSheetsService(db)
       : new GoogleSheetsService({
           db,
           sheetId: env.GOOGLE_SHEETS_SHEET_ID,
           spreadsheetId: env.GOOGLE_SHEETS_SPREADSHEET_ID,
           range: env.GOOGLE_SHEETS_RANGE,
-          serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-          privateKey: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY,
+          ...loadGoogleSheetsCredentials(env),
         }));
   const notifications =
     options.notifications ??
@@ -742,6 +742,30 @@ export async function buildApp(options: AppOptions = {}) {
           if (!['localhost', '127.0.0.1', '['].includes(host!))
             return reply.status(403).send({ error: 'Demo endpoints are local only' });
         });
+        dev.get('/config', async (_req, reply) =>
+          reply.header('Cache-Control', 'no-store').send({
+            ai: {
+              provider: env.AI_PROVIDER,
+              model: env.AI_PROVIDER === 'openai' ? env.OPENAI_MODEL : null,
+            },
+            sheets: {
+              provider: env.GOOGLE_SHEETS_PROVIDER,
+              enabled: env.GOOGLE_SHEETS_ENABLED,
+              url:
+                env.GOOGLE_SHEETS_ENABLED && env.GOOGLE_SHEETS_PROVIDER === 'google'
+                  ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(env.GOOGLE_SHEETS_SPREADSHEET_ID)}/edit#gid=${env.GOOGLE_SHEETS_SHEET_ID}`
+                  : null,
+            },
+            whatsapp: { provider: env.INTEGRATION_MODE === 'demo' ? 'demo' : 'meta' },
+            telegram: {
+              enabled: env.TELEGRAM_ENABLED,
+              provider:
+                env.TELEGRAM_ENABLED && env.INTEGRATION_MODE !== 'demo' ? 'telegram' : 'demo',
+            },
+            managerHandoffEnabled: env.MANAGER_HANDOFF_ENABLED,
+            paymentProvider: env.PAYMENT_PROVIDER,
+          }),
+        );
         dev.get('/state', async (req) =>
           snapshot(fromSchema.parse((req.query as { from?: string }).from ?? '+77070000001')),
         );

@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "demo": "tsx scripts/demo.ts",
+    "demo:connected": "tsx scripts/demo.ts --connected",
     "build": "prisma generate && tsc -p tsconfig.build.json",
     "start": "node dist/src/server.js",
     "typecheck": "tsc --noEmit",
@@ -25,6 +26,7 @@
     "worker:dev": "tsx watch src/worker.ts",
     "check:production": "tsx scripts/check-production.ts",
     "sheets:migrate": "tsx scripts/migrate-sheets.ts",
+    "sheets:setup": "tsx scripts/setup-sheets.ts",
     "db:validate": "prisma validate",
     "db:check": "tsx scripts/check-database.ts",
     "test:openai": "tsx scripts/test-openai.ts",

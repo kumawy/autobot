@@ -20,11 +20,7 @@
       </a>
       <div class="environment">
         <span class="status-dot" aria-hidden="true"></span
-        ><span
-          >Локальный симулятор<span class="environment-detail">
-            • реальные сообщения и платежи не отправляются</span
-          ></span
-        >
+        ><span id="integration-summary">Проверяем режим работы…</span>
       </div>
       <span class="version">DEMO / 1.1</span>
     </header>
@@ -92,6 +88,8 @@
             ><span class="arrow" aria-hidden="true">↗</span>
           </button>
           <button
+            id="manager-scenario"
+            hidden
             type="button"
             class="scenario-button"
             data-message="Позовите, пожалуйста, менеджера"
@@ -169,7 +167,7 @@
           </button>
         </form>
         <div class="composer-footer">
-          <span id="status-line" role="status">Сообщения остаются в локальном приложении</span
+          <span id="status-line" role="status">Проверяем режим обработки сообщений…</span
           ><span>Enter ↵</span>
         </div>
       </section>
@@ -192,6 +190,21 @@
             <li><span>3</span>Оплата</li>
             <li><span>4</span>Подтверждение</li>
           </ol>
+        </section>
+
+        <section class="panel integrations-panel" aria-labelledby="integrations-heading">
+          <div class="section-heading"><h2 id="integrations-heading">Режим демо</h2></div>
+          <p id="integration-state" class="panel-description" role="status">Загружаем настройки…</p>
+          <dl id="integration-details" class="integration-details"></dl>
+          <p id="integration-privacy" class="field-hint"></p>
+          <a
+            id="google-sheet-link"
+            class="integration-link"
+            target="_blank"
+            rel="noopener noreferrer"
+            hidden
+            >Открыть Google Sheets ↗</a
+          >
         </section>
 
         <section class="panel order-panel">
@@ -231,7 +244,7 @@
             <h2>Диалог у менеджера</h2>
             <span aria-hidden="true">☏</span>
           </div>
-          <p>
+          <p id="handoff-description">
             AI-ответы приостановлены. Платёжные события продолжают учитываться. Можно явно вернуться
             к боту.
           </p>
@@ -279,9 +292,8 @@
           </div>
           <div id="jobs-content"></div>
         </section>
-        <p class="inspector-note">
+        <p id="payment-note" class="inspector-note">
           Оплату подтверждает проверенный серверный результат. Фраза «я оплатил» не меняет статус.
-          DEMO: деньги не списываются.
         </p>
       </aside>
     </main>

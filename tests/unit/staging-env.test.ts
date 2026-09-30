@@ -22,6 +22,8 @@ describe('staging configuration', () => {
   it('enables Meta/OpenAI with mock payment and no optional integrations', () => {
     const env = readEnv(staging);
     expect(env.INTEGRATION_MODE).toBe('staging');
+    expect(env.AI_PROVIDER).toBe('openai');
+    expect(env.GOOGLE_SHEETS_PROVIDER).toBe('google');
     expect(env.OPENAI_MODEL).toBe(staging.OPENAI_MODEL);
     expect(env.PAYMENT_PROVIDER).toBe('mock');
     expect(env.GOOGLE_SHEETS_ENABLED).toBe(false);
