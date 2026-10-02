@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { SHEET_HEADERS } from '../../src/modules/sheets/google-sheets.service.js';
 import {
   setupOrdersSheet,
+  setupShippingColumns,
   type SheetsSetupApi,
   type SetupOrdersSheetOptions,
 } from '../../src/modules/sheets/setup.js';
+import { SHIPPING_HEADERS, shippingInputRange } from '../../src/modules/sheets/shipping.js';
 
 const options: SetupOrdersSheetOptions = {
   spreadsheetId: 'owner-created-spreadsheet',
@@ -55,6 +57,48 @@ function api(
 }
 
 describe('safe Orders tab setup', () => {
+  it('adds shipping columns to a populated sheet without rewriting orders or granting access to status', async () => {
+    const mock = api(undefined, [SHEET_HEADERS, ['MB-paid-order', 'existing values']]);
+    await setupShippingColumns(options, mock);
+    const requests = mock.batchUpdate.mock.calls[0]![0] as sheets_v4.Schema$Request[];
+    const writes = requests.filter((r) => r.updateCells);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.updateCells?.start).toEqual({ sheetId: 7, rowIndex: 0, columnIndex: 25 });
+    expect(
+      writes[0]?.updateCells?.rows?.[0]?.values?.map((c) => c.userEnteredValue?.stringValue),
+    ).toEqual(SHIPPING_HEADERS);
+    expect(requests.find((r) => r.updateProtectedRange)?.updateProtectedRange).toEqual({
+      protectedRange: { protectedRangeId: 10, unprotectedRanges: [shippingInputRange(7)] },
+      fields: 'unprotectedRanges',
+    });
+    expect(
+      requests.find((r) => r.setDataValidation)?.setDataValidation?.rule?.condition?.type,
+    ).toBe('BOOLEAN');
+  });
+
+  it('preserves existing shipping inputs on repeated setup', async () => {
+    const sheet = ordersSheet();
+    sheet.properties!.gridProperties!.columnCount = 28;
+    sheet.protectedRanges![0]!.unprotectedRanges = [shippingInputRange(7)];
+    const mock = api(
+      [sheet],
+      [
+        [...SHEET_HEADERS, ...SHIPPING_HEADERS],
+        ['MB-order', ...Array(24).fill(''), 'AP123456789KZ', true],
+      ],
+    );
+    await setupShippingColumns(options, mock);
+    const requests = mock.batchUpdate.mock.calls[0]![0] as sheets_v4.Schema$Request[];
+    expect(requests.some((r) => r.updateCells || r.updateProtectedRange || r.appendDimension)).toBe(
+      false,
+    );
+  });
+
+  it('does not erase unlabelled existing data in shipping columns', async () => {
+    const mock = api(undefined, [SHEET_HEADERS, ['MB-order', ...Array(24).fill(''), 'user data']]);
+    await expect(setupShippingColumns(options, mock)).rejects.toThrow('SHIPPING_COLUMNS_NOT_EMPTY');
+    expect(mock.batchUpdate).not.toHaveBeenCalled();
+  });
   it('creates Orders in one batch without touching other sheets', async () => {
     const mock = api([{ properties: { title: 'Personal', sheetId: 0 } }]);
     const result = await setupOrdersSheet(options, mock);

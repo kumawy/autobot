@@ -1,20 +1,24 @@
 import { z } from 'zod';
 import type { OutboundMessage } from '../../types/domain.js';
 
-const templateSchema = (parameters: 'orderId'[]) =>
+type TemplateParameter = 'orderId' | 'trackingNumber';
+const templateSchema = (parameters: TemplateParameter[]) =>
   z
     .object({
       name: z.string().min(1).max(512),
       locale: z.string().min(2).max(20),
       available: z.boolean(),
-      parameters: z.array(z.literal('orderId')).max(1).default(parameters),
+      parameters: z
+        .array(z.enum(['orderId', 'trackingNumber']))
+        .max(2)
+        .default(parameters),
     })
     .strict()
     .refine(
       (value) => JSON.stringify(value.parameters) === JSON.stringify(parameters),
       'Template parameters do not match purpose',
     );
-const localized = (parameters: 'orderId'[]) =>
+const localized = (parameters: TemplateParameter[]) =>
   z
     .object({
       ru: templateSchema(parameters).optional(),
@@ -26,11 +30,12 @@ const registrySchema = z
     order_paid: localized(['orderId']).optional(),
     payment_review: localized(['orderId']).optional(),
     support_reopen: localized([]).optional(),
+    order_shipped: localized(['orderId', 'trackingNumber']).optional(),
   })
   .strict();
 export type TemplateRegistry = z.infer<typeof registrySchema>;
 export type SendPurpose =
-  'order_paid' | 'payment_review' | 'support_reopen' | 'operator_reply' | 'reply';
+  'order_paid' | 'payment_review' | 'support_reopen' | 'order_shipped' | 'operator_reply' | 'reply';
 export function parseTemplateRegistry(raw: string): TemplateRegistry {
   return registrySchema.parse(JSON.parse(raw || '{}'));
 }
@@ -59,6 +64,9 @@ export function decideWhatsAppSend(input: {
   if (input.isAiReply && customer.conversationState === 'HUMAN_HANDOFF')
     return { allowed: false, code: 'STALE_AI' };
   const purpose = input.purpose ?? 'reply';
+  // Shipping is an employee-initiated update, including inside the conversation window.
+  if (purpose === 'order_shipped' && (!customer.notificationConsent || customer.optedOutAt))
+    return { allowed: false, code: 'BLOCKED_CONSENT' };
   if (purpose === 'operator_reply' && input.operatorTicketOpen === false)
     return { allowed: false, code: 'STALE_OPERATOR' };
   const initiated = !['reply', 'operator_reply'].includes(purpose) || message.type === 'template';
@@ -71,7 +79,7 @@ export function decideWhatsAppSend(input: {
   if (initiated && (!customer.notificationConsent || customer.optedOutAt))
     return { allowed: false, code: 'BLOCKED_CONSENT' };
   const makeTemplate = (
-    kind: 'order_paid' | 'payment_review' | 'support_reopen',
+    kind: keyof TemplateRegistry,
     parameters: string[],
   ): OutboundMessage | undefined => {
     if (!customer.preferredLanguage) return undefined;
@@ -86,9 +94,7 @@ export function decideWhatsAppSend(input: {
     const kinds = purpose === 'reply' || purpose === 'operator_reply' ? [] : [purpose];
     const known = kinds.some((kind) => {
       const configured = customer.preferredLanguage
-        ? registry[kind as 'order_paid' | 'payment_review' | 'support_reopen']?.[
-            customer.preferredLanguage
-          ]
+        ? registry[kind as keyof TemplateRegistry]?.[customer.preferredLanguage]
         : undefined;
       return (
         configured?.available &&

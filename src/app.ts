@@ -232,6 +232,8 @@ export async function buildApp(options: AppOptions = {}) {
           sheetId: env.GOOGLE_SHEETS_SHEET_ID,
           spreadsheetId: env.GOOGLE_SHEETS_SPREADSHEET_ID,
           range: env.GOOGLE_SHEETS_RANGE,
+          shippingEnabled: env.GOOGLE_SHEETS_SHIPPING_ENABLED,
+          demoNotifications: env.INTEGRATION_MODE === 'demo',
           ...loadGoogleSheetsCredentials(env),
         }));
   const notifications =

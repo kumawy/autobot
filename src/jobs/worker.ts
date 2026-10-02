@@ -80,6 +80,13 @@ export class Worker {
       if (Date.now() - this.lastMaintenance > 60000) {
         await this.maintenance();
         this.lastMaintenance = Date.now();
+        // A sheet outage must not stop payment processing or customer conversations.
+        if (this.deps.env.GOOGLE_SHEETS_ENABLED && this.deps.env.GOOGLE_SHEETS_SHIPPING_ENABLED)
+          try {
+            await this.deps.sheets.pollShipments?.();
+          } catch (error) {
+            this.deps.onError?.(error);
+          }
       }
       let lastHeartbeat = Date.now();
       for (let i = 0; i < 100; i++) {
@@ -254,11 +261,25 @@ export class Worker {
         const order = job.orderId
           ? await db.order.findUnique({ where: { id: job.orderId } })
           : null;
+        if (
+          payload.purpose === 'order_shipped' &&
+          (!order?.trackingNumber ||
+            !order.shippedAt ||
+            order.paymentStatus !== 'PAID' ||
+            !['SHIPPED', 'COMPLETED'].includes(order.orderStatus) ||
+            order.fulfillmentHold ||
+            order.reviewRequired)
+        )
+          throw new BlockedError('SHIPMENT_NOT_SENDABLE');
         const decision = decideWhatsAppSend({
           customer,
           message: payload,
           purpose: payload.purpose ?? (payload.paidConfirmation ? 'order_paid' : 'reply'),
-          templateParameters: order ? [order.publicOrderId] : (payload.templateParameters ?? []),
+          templateParameters: order
+            ? payload.purpose === 'order_shipped'
+              ? [order.publicOrderId, order.trackingNumber!]
+              : [order.publicOrderId]
+            : (payload.templateParameters ?? []),
           registry: parseTemplateRegistry(env.WHATSAPP_TEMPLATE_REGISTRY),
           isAiReply:
             !payload.handoffNotice && (payload.consultation === true || payload.origin === 'bot'),

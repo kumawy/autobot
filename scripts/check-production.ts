@@ -129,6 +129,7 @@ if (env && raw.DATABASE_URL) {
           spreadsheetId: env.GOOGLE_SHEETS_SPREADSHEET_ID,
           sheetId: env.GOOGLE_SHEETS_SHEET_ID,
           range: env.GOOGLE_SHEETS_RANGE,
+          shippingEnabled: env.GOOGLE_SHEETS_SHIPPING_ENABLED,
           ...sheetsCredentials,
         });
         const result = await sheets.checkSetup();
@@ -163,7 +164,13 @@ if (env && raw.DATABASE_URL) {
 }
 try {
   const registry = parseTemplateRegistry(raw.WHATSAPP_TEMPLATE_REGISTRY ?? '{}');
-  for (const purpose of ['order_paid', 'payment_review', 'support_reopen'] as const)
+  const purposes = [
+    'order_paid',
+    'payment_review',
+    'support_reopen',
+    ...(raw.GOOGLE_SHEETS_SHIPPING_ENABLED === 'true' ? ['order_shipped' as const] : []),
+  ] as const;
+  for (const purpose of purposes)
     for (const language of ['ru', 'kk'] as const)
       if (!registry[purpose]?.[language]?.available)
         add(

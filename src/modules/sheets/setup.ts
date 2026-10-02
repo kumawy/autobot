@@ -1,6 +1,7 @@
 import { google, type sheets_v4 } from 'googleapis';
 import { SHEET_HEADERS } from './google-sheets.service.js';
 import { isGoogleAccountEmail, type GoogleSheetsCredentials } from './credentials.js';
+import { SHIPPING_HEADERS, hasShippingInputRange, shippingInputRange } from './shipping.js';
 
 export class GoogleSheetsSetupError extends Error {
   constructor(readonly code: string) {
@@ -91,7 +92,8 @@ function matchesProtection(
     protection.range.endColumnIndex == null &&
     !protection.namedRangeId &&
     !protection.tableId &&
-    !protection.unprotectedRanges?.length &&
+    (!protection.unprotectedRanges?.length ||
+      hasShippingInputRange(protection.unprotectedRanges, sheetId)) &&
     protection.requestingUserCanEdit !== false &&
     !protection.editors?.groups?.length &&
     protection.editors?.domainUsersCanEdit !== true &&
@@ -181,7 +183,11 @@ export async function setupOrdersSheet(
         const headers = values[0] ?? [];
         if (
           !SHEET_HEADERS.every((header, index) => headers[index] === header) ||
-          headers.slice(SHEET_HEADERS.length).some((cell) => cell !== '' && cell != null)
+          (headers.slice(SHEET_HEADERS.length).some((cell) => cell !== '' && cell != null) &&
+            !(
+              SHIPPING_HEADERS.every((header, index) => headers[index + 25] === header) &&
+              !headers.slice(28).some((cell) => cell !== '' && cell != null)
+            ))
         )
           throw new GoogleSheetsSetupError('SHEET_HEADERS_MISMATCH');
       }
@@ -237,4 +243,126 @@ export async function setupOrdersSheet(
     // Google errors may include request config, OAuth assertions or sheet contents.
     throw new GoogleSheetsSetupError('SHEETS_SETUP_API_FAILED');
   }
+}
+
+/** Add only Z:AB to the existing Orders report. Never alter existing order/input values. */
+export async function setupShippingColumns(
+  options: SetupOrdersSheetOptions,
+  suppliedApi?: SheetsSetupApi,
+): Promise<SetupOrdersSheetResult> {
+  // Validate ownership/protection/base layout using the same checks as ordinary setup.
+  const api = suppliedApi ?? createApi(options);
+  const result = await setupOrdersSheet(options, api);
+  const metadata = await api.getSpreadsheet();
+  const sheet = metadata.sheets?.find((s) => s.properties?.sheetId === result.sheetId);
+  if (!sheet) throw new GoogleSheetsSetupError('SHEET_STRUCTURE_CHANGED');
+  const values = await api.getValues("'Orders'");
+  const extended = SHIPPING_HEADERS.every((header, i) => values[0]?.[i + 25] === header);
+  if (!extended && values.some((row) => row.slice(25).some((cell) => cell !== '' && cell != null)))
+    throw new GoogleSheetsSetupError('SHIPPING_COLUMNS_NOT_EMPTY');
+  const protections = sheet.protectedRanges ?? [];
+  if (protections.length !== 1 || protections[0]?.protectedRangeId == null)
+    throw new GoogleSheetsSetupError('SHEET_PROTECTION_MISMATCH');
+  const sheetId = result.sheetId;
+  const requests: sheets_v4.Schema$Request[] = [];
+  if ((sheet.properties?.gridProperties?.columnCount ?? 0) < 28)
+    requests.push({
+      appendDimension: {
+        sheetId,
+        dimension: 'COLUMNS',
+        length: 28 - (sheet.properties?.gridProperties?.columnCount ?? 0),
+      },
+    });
+  if (!extended)
+    requests.push({
+      updateCells: {
+        start: { sheetId, rowIndex: 0, columnIndex: 25 },
+        rows: [
+          {
+            values: SHIPPING_HEADERS.map((header) => ({
+              userEnteredValue: { stringValue: header },
+            })),
+          },
+        ],
+        fields: 'userEnteredValue',
+      },
+    });
+  if (!hasShippingInputRange(protections[0].unprotectedRanges, sheetId))
+    requests.push({
+      updateProtectedRange: {
+        protectedRange: {
+          protectedRangeId: protections[0].protectedRangeId,
+          unprotectedRanges: [shippingInputRange(sheetId)],
+        },
+        fields: 'unprotectedRanges',
+      },
+    });
+  requests.push(
+    {
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: 1,
+          startColumnIndex: 25,
+          endColumnIndex: 28,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.12, green: 0.25, blue: 0.34 },
+            textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            wrapStrategy: 'WRAP',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat',
+      },
+    },
+    {
+      repeatCell: {
+        range: shippingInputRange(sheetId),
+        cell: { userEnteredFormat: { backgroundColor: { red: 0.94, green: 0.97, blue: 1 } } },
+        fields: 'userEnteredFormat.backgroundColor',
+      },
+    },
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: 25, endColumnIndex: 26 },
+        cell: { userEnteredFormat: { numberFormat: { type: 'TEXT' } } },
+        fields: 'userEnteredFormat.numberFormat',
+      },
+    },
+    {
+      setDataValidation: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: 26, endColumnIndex: 27 },
+        rule: {
+          condition: { type: 'BOOLEAN' },
+          strict: true,
+          showCustomUi: true,
+          inputMessage:
+            'Отметьте после передачи посылки Казпочте. Клиент получит трек автоматически.',
+        },
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: 'COLUMNS', startIndex: 25, endIndex: 27 },
+        properties: { pixelSize: 210 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: 'COLUMNS', startIndex: 27, endIndex: 28 },
+        properties: { pixelSize: 430 },
+        fields: 'pixelSize',
+      },
+    },
+  );
+  try {
+    await api.batchUpdate(requests);
+  } catch {
+    throw new GoogleSheetsSetupError('SHEETS_SETUP_API_FAILED');
+  }
+  return { ...result, status: 'initialized' };
 }

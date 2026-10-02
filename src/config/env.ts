@@ -44,6 +44,7 @@ const schema = z.object({
   FREEDOMPAY_TEST_MODE: flag(true),
   GOOGLE_SHEETS_SPREADSHEET_ID: optional,
   GOOGLE_SHEETS_ENABLED: flag(false),
+  GOOGLE_SHEETS_SHIPPING_ENABLED: flag(false),
   GOOGLE_SHEETS_PROVIDER: z.enum(['demo', 'google']),
   GOOGLE_SHEETS_RANGE: z.string().default('Orders!A:Y'),
   GOOGLE_APPLICATION_CREDENTIALS: optional,

@@ -63,6 +63,7 @@ npm run worker           # Собранный worker
 ## Документация
 
 - [Переходы диалога](docs/state-transitions.md)
+- [Трек-номер и отправка посылки через Google Sheets](docs/sheet-shipping.md)
 - [Эксплуатация, очереди, миграции и восстановление](docs/operations.md)
 - [Freedom Pay](docs/integrations/freedompay.md)
 - [WhatsApp, Telegram и Google Sheets](docs/integrations/whatsapp-telegram-sheets.md)

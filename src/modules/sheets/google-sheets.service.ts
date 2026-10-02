@@ -2,6 +2,12 @@ import { google, type sheets_v4 } from 'googleapis';
 import type { Order, Customer, PrismaClient } from '@prisma/client';
 import { lock } from '../../db/prisma.js';
 import { enqueue } from '../../jobs/outbox.js';
+import {
+  SHIPPING_HEADERS,
+  hasShippingInputRange,
+  acceptSheetShipment,
+  shipmentNotificationStatus,
+} from './shipping.js';
 
 export const SHEET_HEADERS = [
   'Order ID',
@@ -118,6 +124,7 @@ export interface SheetLease {
 }
 export interface SheetsService {
   sync(order: SheetOrder, lease?: SheetLease): Promise<string>;
+  pollShipments?(): Promise<void>;
 }
 export class SheetStructureError extends Error {
   readonly code: string;
@@ -134,6 +141,8 @@ export interface GoogleSheetsOptions {
   range: string;
   serviceAccountEmail: string;
   privateKey: string;
+  shippingEnabled?: boolean;
+  demoNotifications?: boolean;
 }
 
 /** Short DB transactions reserve/finalize a row; every Google request is outside them. */
@@ -141,6 +150,7 @@ export class GoogleSheetsService implements SheetsService {
   private readonly api: sheets_v4.Sheets;
   private readonly title: string;
   private readonly sheet: string;
+  private lastShipmentRow = 1;
   constructor(private readonly options: GoogleSheetsOptions) {
     const match = /^(?:'([^']+)'|([A-Za-z0-9_ -]+))!A(?:1)?:Y$/.exec(options.range);
     if (!match) throw new Error('Sheet range must be Orders!A:Y (order IDs in column A)');
@@ -176,7 +186,8 @@ export class GoogleSheetsService implements SheetsService {
         range.range.endRowIndex == null &&
         range.range.startColumnIndex == null &&
         range.range.endColumnIndex == null &&
-        !range.unprotectedRanges?.length,
+        (!range.unprotectedRanges?.length ||
+          hasShippingInputRange(range.unprotectedRanges, this.options.sheetId)),
     );
     if (!protectedSheet) throw new SheetStructureError('SHEET_NOT_PROTECTED');
     return sheet;
@@ -186,6 +197,7 @@ export class GoogleSheetsService implements SheetsService {
     try {
       await this.properties();
       await this.headers(false);
+      if (this.options.shippingEnabled) await this.shippingHeaders();
       return { ready: true, issues: [] };
     } catch (error) {
       return {
@@ -193,6 +205,92 @@ export class GoogleSheetsService implements SheetsService {
         issues: [error instanceof SheetStructureError ? error.code : 'SHEET_ACCESS_FAILED'],
       };
     }
+  }
+
+  private async shippingHeaders(): Promise<void> {
+    const response = await this.api.spreadsheets.values.get(
+      {
+        spreadsheetId: this.options.spreadsheetId,
+        range: `${this.sheet}!Z1:AB1`,
+        valueRenderOption: 'FORMULA',
+      },
+      { timeout: 12000, retry: false },
+    );
+    if (!SHIPPING_HEADERS.every((header, i) => response.data.values?.[0]?.[i] === header))
+      throw new SheetStructureError('SHIPPING_HEADERS_MISMATCH');
+  }
+
+  /** Reads a bounded page per minute; never writes employee-owned Z:AA cells. */
+  async pollShipments(): Promise<void> {
+    if (!this.options.shippingEnabled) return;
+    const { db, spreadsheetId, sheetId } = this.options;
+    await this.properties();
+    await this.headers(false);
+    await this.shippingHeaders();
+    const page = () =>
+      db.sheetBinding.findMany({
+        where: {
+          spreadsheetId,
+          sheetId,
+          rowIndex: { gt: this.lastShipmentRow },
+          syncedOrderVersion: { gt: 0 },
+        },
+        orderBy: { rowIndex: 'asc' },
+        take: 100,
+      });
+    let bindings = await page();
+    if (!bindings.length && this.lastShipmentRow > 1) {
+      this.lastShipmentRow = 1;
+      bindings = await page();
+    }
+    if (!bindings.length) return;
+    const orders = await db.order.findMany({
+      where: { id: { in: bindings.map((b) => b.orderId) } },
+      select: { id: true, publicOrderId: true },
+    });
+    const orderIds = new Map(orders.map((o) => [o.id, o.publicOrderId]));
+    const response = await this.api.spreadsheets.values.batchGet(
+      {
+        spreadsheetId,
+        ranges: bindings.map((b) => `${this.sheet}!A${b.rowIndex}:AB${b.rowIndex}`),
+        valueRenderOption: 'FORMULA',
+      },
+      { timeout: 12000, retry: false },
+    );
+    const rows = response.data.valueRanges ?? [];
+    // Detect moved/deleted rows before accepting any confirmation in this page.
+    if (
+      rows.length !== bindings.length ||
+      bindings.some(
+        (b, i) => !orderIds.has(b.orderId) || rows[i]?.values?.[0]?.[0] !== orderIds.get(b.orderId),
+      )
+    )
+      throw new SheetStructureError('SHIPPING_ORDER_ROW_MISMATCH');
+    const updates: sheets_v4.Schema$ValueRange[] = [];
+    for (const [i, binding] of bindings.entries()) {
+      const row: unknown[] = rows[i]!.values![0]!;
+      const error = await acceptSheetShipment(db, {
+        binding,
+        publicOrderId: row[0],
+        tracking: row[25],
+        confirmed: row[26],
+      });
+      const status =
+        error ??
+        (await shipmentNotificationStatus(
+          db,
+          binding.orderId,
+          this.options.demoNotifications === true,
+        ));
+      if (row[27] !== status)
+        updates.push({ range: `${this.sheet}!AB${binding.rowIndex}`, values: [[status]] });
+    }
+    if (updates.length)
+      await this.api.spreadsheets.values.batchUpdate(
+        { spreadsheetId, requestBody: { valueInputOption: 'RAW', data: updates } },
+        { timeout: 12000, retry: false },
+      );
+    this.lastShipmentRow = bindings[bindings.length - 1]!.rowIndex;
   }
 
   private async headers(initialize: boolean): Promise<void> {
@@ -290,6 +388,45 @@ export class GoogleSheetsService implements SheetsService {
       );
     }
     await this.headers(true);
+    if (this.options.shippingEnabled) {
+      await this.shippingHeaders();
+      // Rows appended after initial setup must also have a checkbox and a text-only track.
+      await this.api.spreadsheets.batchUpdate(
+        {
+          spreadsheetId,
+          requestBody: {
+            requests: [
+              {
+                setDataValidation: {
+                  range: {
+                    sheetId,
+                    startRowIndex: snapshot.binding.rowIndex - 1,
+                    endRowIndex: snapshot.binding.rowIndex,
+                    startColumnIndex: 26,
+                    endColumnIndex: 27,
+                  },
+                  rule: { condition: { type: 'BOOLEAN' }, strict: true, showCustomUi: true },
+                },
+              },
+              {
+                repeatCell: {
+                  range: {
+                    sheetId,
+                    startRowIndex: snapshot.binding.rowIndex - 1,
+                    endRowIndex: snapshot.binding.rowIndex,
+                    startColumnIndex: 25,
+                    endColumnIndex: 26,
+                  },
+                  cell: { userEnteredFormat: { numberFormat: { type: 'TEXT' } } },
+                  fields: 'userEnteredFormat.numberFormat',
+                },
+              },
+            ],
+          },
+        },
+        { timeout: 12000, retry: false },
+      );
+    }
     const range = `${this.sheet}!A${snapshot.binding.rowIndex}:Y${snapshot.binding.rowIndex}`;
     const existing = await this.api.spreadsheets.values.get(
       { spreadsheetId, range, valueRenderOption: 'UNFORMATTED_VALUE' },

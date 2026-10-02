@@ -14,6 +14,11 @@ import {
   SHEET_HEADERS,
   type SheetOrder,
 } from '../../src/modules/sheets/google-sheets.service.js';
+import {
+  SHIPPING_HEADERS,
+  shippingInputRange,
+  shippingJobKey,
+} from '../../src/modules/sheets/shipping.js';
 import { HandoffService } from '../../src/modules/notifications/handoff.service.js';
 import { migrateLegacySheetRows } from '../../src/modules/sheets/legacy-migration.js';
 
@@ -23,6 +28,8 @@ const api = vi.hoisted(() => ({
   get: vi.fn(),
   update: vi.fn(),
   append: vi.fn(),
+  batchGet: vi.fn(),
+  valuesBatchUpdate: vi.fn(),
 }));
 vi.mock('googleapis', () => ({
   google: {
@@ -30,7 +37,13 @@ vi.mock('googleapis', () => ({
       spreadsheets: {
         get: api.metadata,
         batchUpdate: api.batchUpdate,
-        values: { get: api.get, update: api.update, append: api.append },
+        values: {
+          get: api.get,
+          update: api.update,
+          append: api.append,
+          batchGet: api.batchGet,
+          batchUpdate: api.valuesBatchUpdate,
+        },
       },
     }),
     auth: { JWT: class {} },
@@ -182,6 +195,106 @@ function telegram(text: string | undefined, manager = 11, replyTo?: number) {
 }
 
 describe('fixed-row Sheets with real PostgreSQL allocation', () => {
+  it('imports shipping controls, preserves inputs during resync, and refreshes only notification status', async () => {
+    const paid = await order();
+    await sheets().sync(paid);
+    const binding = await db.sheetBinding.findUniqueOrThrow({ where: { orderId: paid.id } });
+    api.metadata.mockImplementation(async () => {
+      const value = metadata();
+      value.data.sheets[0]!.properties.gridProperties.columnCount = 28;
+      return {
+        data: {
+          sheets: [
+            {
+              ...value.data.sheets[0],
+              protectedRanges: [
+                {
+                  range: { sheetId: 7 },
+                  warningOnly: false,
+                  unprotectedRanges: [shippingInputRange(7)],
+                },
+              ],
+            },
+          ],
+        },
+      };
+    });
+    rows.set("'Orders'!Z1:AB1", SHIPPING_HEADERS);
+    const tracking = `AP${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}KZ`;
+    const shipping = new GoogleSheetsService({
+      db,
+      spreadsheetId: 'spreadsheet',
+      sheetId: 7,
+      range: 'Orders!A:Y',
+      serviceAccountEmail: 'test@example.test',
+      privateKey: 'test',
+      shippingEnabled: true,
+    });
+    api.batchGet.mockImplementation(async ({ ranges }: { ranges: string[] }) => ({
+      data: {
+        valueRanges: await Promise.all(
+          ranges.map(async (range) => {
+            const rowIndex = Number(/!A(\d+)/.exec(range)?.[1]);
+            const b = await db.sheetBinding.findUniqueOrThrow({
+              where: {
+                spreadsheetId_sheetId_rowIndex: {
+                  spreadsheetId: 'spreadsheet',
+                  sheetId: 7,
+                  rowIndex,
+                },
+              },
+            });
+            const o = await db.order.findUniqueOrThrow({ where: { id: b.orderId } });
+            return {
+              range,
+              values: [
+                [
+                  o.publicOrderId,
+                  ...Array(24).fill(''),
+                  ...(b.id === binding.id ? [tracking, true] : ['', false]),
+                ],
+              ],
+            };
+          }),
+        ),
+      },
+    }));
+    api.valuesBatchUpdate.mockResolvedValue({ data: {} });
+    await shipping.pollShipments();
+    await shipping.pollShipments();
+    expect(await db.outboxJob.count({ where: { dedupeKey: shippingJobKey(paid.id) } })).toBe(1);
+    expect((await db.order.findUniqueOrThrow({ where: { id: paid.id } })).trackingNumber).toBe(
+      tracking,
+    );
+    for (const call of api.valuesBatchUpdate.mock.calls) {
+      expect(call[0].requestBody.valueInputOption).toBe('RAW');
+      expect(
+        call[0].requestBody.data.every((r: { range: string }) => /!AB\d+$/.test(r.range)),
+      ).toBe(true);
+    }
+    api.update.mockClear();
+    await shipping.sync(paid);
+    expect(api.update.mock.calls.every((call) => /!A\d+:Y\d+$/.test(call[0].range))).toBe(true);
+  });
+
+  it('rejects moved rows before accepting shipping confirmations', async () => {
+    const paid = await order();
+    await sheets().sync(paid);
+    rows.set("'Orders'!Z1:AB1", SHIPPING_HEADERS);
+    api.batchGet.mockResolvedValue({ data: { valueRanges: [{ values: [['OTHER-ORDER']] }] } });
+    const shipping = new GoogleSheetsService({
+      db,
+      spreadsheetId: 'spreadsheet',
+      sheetId: 7,
+      range: 'Orders!A:Y',
+      serviceAccountEmail: 'test@example.test',
+      privateKey: 'test',
+      shippingEnabled: true,
+    });
+    await expect(shipping.pollShipments()).rejects.toThrow('SHIPPING_ORDER_ROW_MISMATCH');
+    expect(await db.outboxJob.count({ where: { dedupeKey: shippingJobKey(paid.id) } })).toBe(0);
+  });
+
   it('concurrent paid orders reserve distinct persistent rows and only use RAW update', async () => {
     const first = await order();
     const second = await order();

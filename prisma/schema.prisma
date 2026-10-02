@@ -146,6 +146,8 @@ model Order {
   sheetSyncStatus         String           @default("NOT_REQUIRED")
   sheetSyncedAt           DateTime?
   sheetRowReference       String?
+  trackingNumber          String?          @unique
+  shippedAt               DateTime?
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
   paymentAttempts         PaymentAttempt[]

@@ -3,11 +3,16 @@ import {
   GoogleSheetsCredentialsError,
   loadGoogleSheetsCredentials,
 } from '../src/modules/sheets/credentials.js';
-import { GoogleSheetsSetupError, setupOrdersSheet } from '../src/modules/sheets/setup.js';
+import {
+  GoogleSheetsSetupError,
+  setupOrdersSheet,
+  setupShippingColumns,
+} from '../src/modules/sheets/setup.js';
 
 try {
   const credentials = loadGoogleSheetsCredentials(process.env);
-  const result = await setupOrdersSheet({
+  const setup = process.argv.includes('--shipping') ? setupShippingColumns : setupOrdersSheet;
+  const result = await setup({
     spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID?.trim() ?? '',
     ownerEmail: process.env.GOOGLE_SHEETS_OWNER_EMAIL?.trim() ?? '',
     credentials,
