@@ -11,6 +11,7 @@ export type ConversationState =
   | 'ORDER_ADDRESS'
   | 'ORDER_DISC'
   | 'ORDER_QUANTITY'
+  | 'ORDER_CONSENT'
   | 'ORDER_CONFIRMATION'
   | 'CANCEL_CONFIRMATION'
   | 'PAYMENT_PENDING'
@@ -71,6 +72,7 @@ export interface OrderData {
   productId: string;
   discId: string | null;
   quantity: number;
+  quantityConfirmed?: boolean;
   unitPrice: number;
   totalAmount: number;
   currency: string;
@@ -132,4 +134,7 @@ export interface ConversationResult {
   createPayment?: boolean;
   handoff?: { reason: string };
   resumeBot?: boolean;
+  /** Only free consultation text belongs in AI history, never order fields or summaries. */
+  consultation?: boolean;
+  consultationMessageIndexes?: number[];
 }

@@ -20,43 +20,56 @@ const raw: NodeJS.ProcessEnv = {
   TELEGRAM_ALLOWED_MANAGER_IDS:
     process.env.TELEGRAM_ALLOWED_USER_IDS || process.env.TELEGRAM_ALLOWED_MANAGER_IDS,
 };
+const baileys = raw.WHATSAPP_TRANSPORT === 'baileys';
 const required = [
   'DATABASE_URL',
   'ADMIN_TOKEN',
-  'WHATSAPP_ACCESS_TOKEN',
-  'WHATSAPP_PHONE_NUMBER_ID',
-  'WHATSAPP_WABA_ID',
-  'WHATSAPP_VERIFY_TOKEN',
-  'WHATSAPP_APP_SECRET',
-  'WHATSAPP_GRAPH_API_VERSION',
+  ...(baileys
+    ? ['WHATSAPP_AUTH_ENCRYPTION_KEY']
+    : [
+        'WHATSAPP_ACCESS_TOKEN',
+        'WHATSAPP_PHONE_NUMBER_ID',
+        'WHATSAPP_WABA_ID',
+        'WHATSAPP_VERIFY_TOKEN',
+        'WHATSAPP_APP_SECRET',
+        'WHATSAPP_GRAPH_API_VERSION',
+      ]),
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'FREEDOMPAY_MERCHANT_ID',
   'FREEDOMPAY_SECRET_KEY',
-  'GOOGLE_SHEETS_SPREADSHEET_ID',
-  'TELEGRAM_BOT_TOKEN',
-  'TELEGRAM_MANAGER_CHAT_ID',
-  'TELEGRAM_ALLOWED_MANAGER_IDS',
-  'TELEGRAM_WEBHOOK_SECRET',
+  ...(raw.GOOGLE_SHEETS_ENABLED === 'false' ? [] : ['GOOGLE_SHEETS_SPREADSHEET_ID']),
+  ...(raw.TELEGRAM_ENABLED === 'false' || !raw.TELEGRAM_BOT_TOKEN
+    ? []
+    : [
+        'TELEGRAM_BOT_TOKEN',
+        'TELEGRAM_MANAGER_CHAT_ID',
+        'TELEGRAM_ALLOWED_MANAGER_IDS',
+        'TELEGRAM_WEBHOOK_SECRET',
+      ]),
 ];
 for (const key of required) if (!raw[key]) add(key, 'MISSING_CONFIGURATION', 'Not configured');
 let sheetsCredentials: ReturnType<typeof loadGoogleSheetsCredentials> | undefined;
-if (
-  raw.GOOGLE_APPLICATION_CREDENTIALS?.trim() ||
-  (raw.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim() && raw.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim())
-) {
-  try {
-    sheetsCredentials = loadGoogleSheetsCredentials(raw);
-  } catch {
-    add('google-credentials', 'INVALID_CONFIGURATION', 'Google credentials could not be loaded');
+if (raw.GOOGLE_SHEETS_ENABLED !== 'false') {
+  if (
+    raw.GOOGLE_APPLICATION_CREDENTIALS?.trim() ||
+    (raw.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim() && raw.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim())
+  ) {
+    try {
+      sheetsCredentials = loadGoogleSheetsCredentials(raw);
+    } catch {
+      add('google-credentials', 'INVALID_CONFIGURATION', 'Google credentials could not be loaded');
+    }
+  } else {
+    add(
+      'google-credentials',
+      'MISSING_CONFIGURATION',
+      'Configure a service-account file or service-account email and private key',
+    );
   }
-} else {
-  add(
-    'google-credentials',
-    'MISSING_CONFIGURATION',
-    'Configure a service-account file or service-account email and private key',
-  );
 }
+if (baileys && !/^[a-fA-F0-9]{64}$/.test(raw.WHATSAPP_AUTH_ENCRYPTION_KEY ?? ''))
+  add('baileys-auth-key', 'INVALID_CONFIGURATION', '32-byte encryption key in hex is required');
 if (
   raw.NODE_ENV !== 'production' ||
   raw.INTEGRATION_MODE !== 'live' ||
@@ -83,6 +96,7 @@ try {
     ...raw,
     NODE_ENV: 'development',
     INTEGRATION_MODE: 'demo',
+    WHATSAPP_TRANSPORT: 'cloud',
     PAYMENT_PROVIDER: 'mock',
     ADMIN_TOKEN: raw.ADMIN_TOKEN || 'check-only-placeholder-secret',
     MOCK_PAYMENT_SECRET: raw.MOCK_PAYMENT_SECRET || 'check-only-placeholder-secret',
@@ -162,50 +176,57 @@ if (env && raw.DATABASE_URL) {
     await db.$disconnect();
   }
 }
-try {
-  const registry = parseTemplateRegistry(raw.WHATSAPP_TEMPLATE_REGISTRY ?? '{}');
-  const purposes = [
-    'order_paid',
-    'payment_review',
-    'support_reopen',
-    ...(raw.GOOGLE_SHEETS_SHIPPING_ENABLED === 'true' ? ['order_shipped' as const] : []),
-  ] as const;
-  for (const purpose of purposes)
-    for (const language of ['ru', 'kk'] as const)
-      if (!registry[purpose]?.[language]?.available)
-        add(
-          `template:${purpose}:${language}`,
-          'MISSING_CONFIGURATION',
-          'Approved locale must be configured',
-        );
-  if (raw.WHATSAPP_ACCESS_TOKEN && raw.WHATSAPP_WABA_ID && raw.WHATSAPP_GRAPH_API_VERSION) {
-    try {
-      const response = await readJson(
-        `https://graph.facebook.com/${raw.WHATSAPP_GRAPH_API_VERSION}/${raw.WHATSAPP_WABA_ID}/message_templates?fields=name,language,status&limit=100`,
-        { Authorization: `Bearer ${raw.WHATSAPP_ACCESS_TOKEN}` },
-      );
-      const templates = response.data as { name: string; language: string; status: string }[];
-      for (const group of Object.values(registry))
-        for (const item of Object.values(group)) {
-          if (!item) continue;
-          const ok = templates.some(
-            (t) => t.name === item.name && t.language === item.locale && t.status === 'APPROVED',
-          );
+if (!baileys)
+  try {
+    const registry = parseTemplateRegistry(raw.WHATSAPP_TEMPLATE_REGISTRY ?? '{}');
+    const purposes = [
+      'order_paid',
+      'payment_review',
+      'support_reopen',
+      ...(raw.GOOGLE_SHEETS_SHIPPING_ENABLED === 'true' ? ['order_shipped' as const] : []),
+    ] as const;
+    for (const purpose of purposes)
+      for (const language of ['ru', 'kk'] as const)
+        if (!registry[purpose]?.[language]?.available)
           add(
-            `meta-template:${item.name}:${item.locale}`,
-            ok ? 'OK' : 'INVALID_CONFIGURATION',
-            ok
-              ? 'Approved in account'
-              : 'Not found approved in first100 templates; inspect pagination/account manually',
+            `template:${purpose}:${language}`,
+            'MISSING_CONFIGURATION',
+            'Approved locale must be configured',
           );
-        }
-    } catch {
-      add('meta', 'ACCESS_FAILED', 'Template account access failed');
+    if (raw.WHATSAPP_ACCESS_TOKEN && raw.WHATSAPP_WABA_ID && raw.WHATSAPP_GRAPH_API_VERSION) {
+      try {
+        const response = await readJson(
+          `https://graph.facebook.com/${raw.WHATSAPP_GRAPH_API_VERSION}/${raw.WHATSAPP_WABA_ID}/message_templates?fields=name,language,status&limit=100`,
+          { Authorization: `Bearer ${raw.WHATSAPP_ACCESS_TOKEN}` },
+        );
+        const templates = response.data as { name: string; language: string; status: string }[];
+        for (const group of Object.values(registry))
+          for (const item of Object.values(group)) {
+            if (!item) continue;
+            const ok = templates.some(
+              (t) => t.name === item.name && t.language === item.locale && t.status === 'APPROVED',
+            );
+            add(
+              `meta-template:${item.name}:${item.locale}`,
+              ok ? 'OK' : 'INVALID_CONFIGURATION',
+              ok
+                ? 'Approved in account'
+                : 'Not found approved in first100 templates; inspect pagination/account manually',
+            );
+          }
+      } catch {
+        add('meta', 'ACCESS_FAILED', 'Template account access failed');
+      }
     }
+  } catch {
+    add('templates', 'INVALID_CONFIGURATION', 'Invalid template registry JSON');
   }
-} catch {
-  add('templates', 'INVALID_CONFIGURATION', 'Invalid template registry JSON');
-}
+if (baileys)
+  add(
+    'baileys-pairing',
+    'MANUAL_TEST_REQUIRED',
+    'Check QR pairing, expected number, reconnection and phone handoff at /whatsapp/connect',
+  );
 if (raw.OPENAI_API_KEY && raw.OPENAI_MODEL) {
   try {
     await readJson(`https://api.openai.com/v1/models/${encodeURIComponent(raw.OPENAI_MODEL)}`, {

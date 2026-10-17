@@ -3,6 +3,7 @@ import type { ConversationState, Customer, Order, PrismaClient } from '@prisma/c
 import { lock, type Tx } from '../../db/prisma.js';
 import { enqueue } from '../../jobs/outbox.js';
 import { safeCustomerText, safeEqual } from '../../utils/security.js';
+import { safeConsultationText } from '../ai/consultation-history.js';
 
 const telegramUpdate = z.object({
   update_id: z.number().int().nonnegative(),
@@ -38,6 +39,21 @@ export class HandoffService {
       throw new Error('Managers must be numeric Telegram user IDs');
   }
 
+  private async cancelBotReplies(tx: Tx, customerId: string) {
+    const pending = await tx.outboxJob.findMany({
+      where: { customerId, kind: 'WHATSAPP', status: { in: ['PENDING', 'RETRY', 'BLOCKED'] } },
+    });
+    const stale = pending.filter((job) => {
+      const p = job.payload as { origin?: string; consultation?: boolean; handoffNotice?: boolean };
+      return !p.handoffNotice && (p.origin === 'bot' || p.consultation);
+    });
+    if (stale.length)
+      await tx.outboxJob.updateMany({
+        where: { id: { in: stale.map((job) => job.id) } },
+        data: { status: 'DONE', completedAt: new Date(), lastError: 'HUMAN_HANDOFF' },
+      });
+  }
+
   async open(
     tx: Tx,
     input: {
@@ -52,6 +68,7 @@ export class HandoffService {
       where: { customerId: input.customerId, status: { in: ['OPEN', 'ASSIGNED'] } },
     });
     const customer = await tx.customer.findUniqueOrThrow({ where: { id: input.customerId } });
+    await this.cancelBotReplies(tx, customer.id);
     if (existing) {
       if (customer.conversationState !== 'HUMAN_HANDOFF')
         await tx.customer.update({
@@ -71,6 +88,32 @@ export class HandoffService {
       where: { id: customer.id },
       data: { conversationState: 'HUMAN_HANDOFF', conversationVersion: { increment: 1 } },
     });
+    const consultation = await tx.message.findMany({
+      where: {
+        customerId: customer.id,
+        type: 'text',
+        payload: { path: ['consultation'], equals: true },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 6,
+    });
+    const context = consultation.reverse().flatMap((message) => {
+      const text = safeConsultationText(message.content);
+      return text
+        ? [`${message.direction === 'inbound' ? 'Клиент' : 'Бот'}: ${text.slice(0, 350)}`]
+        : [];
+    });
+    const order = input.orderId
+      ? await tx.order.findFirst({ where: { id: input.orderId, customerId: customer.id } })
+      : null;
+    const orderContext = order
+      ? [
+          `Заказ: ${order.publicOrderId}`,
+          `Статус: ${order.orderStatus}; оплата: ${order.paymentStatus}`,
+          `Количество комплектов: ${order.quantity}`,
+          `Выбранные мелодии: ${safeCustomerText(order.discTitle ?? order.selectedDiscIds.join(', ')).slice(0, 300) || 'ещё не выбраны'}`,
+        ].join('\n')
+      : 'Заказ ещё не создан.';
     await enqueue(tx, {
       key: `handoff:${ticket.id}:open`,
       kind: 'TELEGRAM',
@@ -80,7 +123,7 @@ export class HandoffService {
         ticketId: ticket.id,
         customerId: customer.id,
         sourceMessageId: `ticket:${ticket.id}`,
-        text: `💬 Обращение ${ticket.id}\nПричина: ${input.reason}\nЯзык: ${customer.preferredLanguage ?? 'не выбран'}\n/claim ${ticket.id}\nОтветьте Reply на это сообщение после принятия обращения.`,
+        text: `💬 Обращение ${ticket.id}\nПричина: ${input.reason}\nЯзык: ${customer.preferredLanguage ?? 'не выбран'}\n/claim ${ticket.id}\nОтветьте Reply на это сообщение после принятия обращения.\n\n${orderContext}${context.length ? `\n\nПоследняя консультация:\n${context.join('\n')}` : ''}`,
       },
     });
     await tx.auditLog.create({
@@ -163,7 +206,7 @@ export class HandoffService {
     await tx.customer.update({
       where: { id: customer.id },
       data: {
-        conversationState: resumedState(customer, order),
+        conversationState: resumedState(customer, order, ticket.previousState),
         conversationVersion: { increment: 1 },
         editingField: null,
       },
@@ -331,18 +374,41 @@ export class HandoffService {
   }
 }
 
-function resumedState(customer: Customer, order: Order | null): ConversationState {
+function resumedState(
+  customer: Customer,
+  order: Order | null,
+  previousState: ConversationState | null,
+): ConversationState {
   if (!customer.preferredLanguage) return 'AWAITING_LANGUAGE';
   if (!order || order.orderStatus === 'CANCELLED' || order.fulfillmentHold || order.reviewRequired)
     return 'MAIN_MENU';
   if (['PAID', 'REFUNDED', 'REFUND_PENDING'].includes(order.paymentStatus)) return 'PAID';
   if (['PENDING', 'CREATING', 'CREATION_UNKNOWN'].includes(order.paymentStatus))
     return 'PAYMENT_PENDING';
+  // The draft's default quantity and incomplete contact fields cannot reveal
+  // whether selection, quantity or consent was the interrupted step.
+  if (
+    !order.checkoutFrozenAt &&
+    ['DRAFT', 'AWAITING_CONFIRMATION'].includes(order.orderStatus) &&
+    previousState &&
+    [
+      'ORDER_DISC',
+      'ORDER_QUANTITY',
+      'ORDER_CITY',
+      'ORDER_CONSENT',
+      'ORDER_NAME',
+      'ORDER_PHONE',
+      'ORDER_ADDRESS',
+      'ORDER_CONFIRMATION',
+    ].includes(previousState)
+  )
+    return previousState;
+  if (!order.selectedDiscIds.length && !order.discId) return 'ORDER_DISC';
+  if (order.quantityConfirmed === false) return 'ORDER_QUANTITY';
+  if (!order.city) return 'ORDER_CITY';
   if (!order.recipientName) return 'ORDER_NAME';
   if (!order.recipientPhone) return 'ORDER_PHONE';
-  if (!order.city) return 'ORDER_CITY';
   if (!order.address) return 'ORDER_ADDRESS';
-  if (!order.selectedDiscIds.length && !order.discId) return 'ORDER_DISC';
   if (order.orderStatus === 'AWAITING_CONFIRMATION') return 'ORDER_CONFIRMATION';
   if (order.checkoutFrozenAt) return 'ORDER_CONFIRMATION';
   if (order.orderStatus === 'DRAFT') return 'ORDER_QUANTITY';

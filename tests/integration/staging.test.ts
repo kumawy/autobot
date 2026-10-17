@@ -216,10 +216,47 @@ async function begin(from: string, language: Language) {
   expect(
     messages.some((m) => m.direction === 'outbound' && /20\s*000/u.test(m.content ?? '')),
   ).toBe(true);
-  return click(from, A.MENU_ORDER);
+  await click(from, A.MENU_ORDER);
+  await click(from, `${A.DISC_PREFIX}${runtime.catalog.discs()[0]!.id}`, true);
+  await click(from, A.DISC_DONE, true);
+  await click(from, A.ORDER_QUANTITY_ONE);
+  await text(from, 'Алматы');
+  return click(from, A.NOTIFICATIONS_SKIP);
 }
 
 describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
+  it.each(['ru', 'kk'] as const)(
+    'resumes recipient collection after a question and accepts natural confirmation through signed ingress (%s)',
+    async (language) => {
+      const from = phone();
+      const started = await begin(from, language);
+      const before = await db.order.findUniqueOrThrow({ where: { id: started.currentOrderId! } });
+      const question = language === 'ru' ? 'Сколько стоит?' : 'Бағасы қанша?';
+      const answered = await text(from, question);
+      expect(answered.conversationState).toBe('ORDER_NAME');
+      expect(await db.order.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({
+        recipientName: null,
+        recipientPhone: null,
+        city: before.city,
+        selectedDiscIds: before.selectedDiscIds,
+        quantity: before.quantity,
+      });
+      expect(answered.notificationConsent).toBe(false);
+      await text(from, 'Арман Тестовый');
+      expect((await text(from, question)).conversationState).toBe('ORDER_PHONE');
+      await text(from, '+77011234567');
+      const address = 'ул. Абая 10\nквартира 5';
+      expect((await text(from, address)).conversationState).toBe('ORDER_CONFIRMATION');
+      const confirmation = language === 'ru' ? 'да, всё верно' : 'бәрі дұрыс';
+      expect((await text(from, confirmation)).conversationState).toBe('PAYMENT_PENDING');
+      await text(from, confirmation);
+      const order = await db.order.findUniqueOrThrow({ where: { id: before.id } });
+      expect(order.address).toBe('ул. Абая 10 квартира 5');
+      expect(order.paymentStatus).toBe('PENDING');
+      expect(await db.paymentAttempt.count({ where: { orderId: before.id } })).toBe(1);
+      expect(await db.handoff.count({ where: { customerId: started.id } })).toBe(0);
+    },
+  );
   it('acks only durable authenticated events before any worker, and deduplicates concurrent inbound deliveries', async () => {
     const from = phone();
     const incoming = message(from, 'Здравствуйте');
@@ -315,7 +352,7 @@ describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
     const started = await db.customer.findUniqueOrThrow({ where: { id: customer.id } });
     const messageCount = (await messagesFor(from)).length;
     const sendsBefore = sent.length;
-    expect(started.conversationState).toBe('ORDER_NAME');
+    expect(started.conversationState).toBe('ORDER_DISC');
     expect(await db.order.count({ where: { customerId: customer.id } })).toBe(1);
     expect(
       (await db.actionToken.findUniqueOrThrow({ where: { token: token.token } })).consumedAt,
@@ -354,11 +391,7 @@ describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
         language === 'ru' ? 'не подключён' : 'қосылмаған',
       );
       await text(from, '+77011234567');
-      await text(from, 'Алматы');
-      await text(from, 'Абая 10, тестовая квартира 1');
-      await click(from, `${A.DISC_PREFIX}${runtime.catalog.discs()[0]!.id}`, true);
-      await click(from, A.DISC_DONE);
-      const confirmed = await click(from, A.ORDER_QUANTITY_ONE);
+      const confirmed = await text(from, 'Абая 10, тестовая квартира 1');
       expect(confirmed.conversationState).toBe('ORDER_CONFIRMATION');
       const order = await db.order.findUniqueOrThrow({ where: { id: confirmed.currentOrderId! } });
       expect(order).toMatchObject({
@@ -388,7 +421,10 @@ describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
     expect(await db.order.findUniqueOrThrow({ where: { id: before.id } })).toEqual(before);
     await runtime.worker.drain();
     const restored = await db.customer.findUniqueOrThrow({ where: { whatsappId: from } });
-    expect(restored).toMatchObject({ currentOrderId: before.id, conversationState: 'ORDER_CITY' });
+    expect(restored).toMatchObject({
+      currentOrderId: before.id,
+      conversationState: 'ORDER_ADDRESS',
+    });
     expect(await db.order.count({ where: { customerId: restored.id } })).toBe(1);
     expect(await db.order.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({
       recipientName: 'Алия Тестовая',
@@ -443,7 +479,7 @@ describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
         where: { customerId: customer.id, status: { in: ['OPEN', 'ASSIGNED'] } },
       }),
     ).toBe(0);
-    expect((await text(from, '+77011234567')).conversationState).toBe('ORDER_CITY');
+    expect((await text(from, '+77011234567')).conversationState).toBe('ORDER_ADDRESS');
     expect(await db.order.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({
       recipientName: before.recipientName,
       recipientPhone: '+77011234567',
@@ -455,11 +491,7 @@ describe('staging: signed Meta ingress and actual WhatsApp adapter', () => {
     await begin(from, 'ru');
     await text(from, 'Арман Тестовый');
     await text(from, '+77011234567');
-    await text(from, 'Алматы');
     await text(from, 'Абая 10, тестовая квартира 1');
-    await click(from, `${A.DISC_PREFIX}${runtime.catalog.discs()[0]!.id}`, true);
-    await click(from, A.DISC_DONE);
-    await click(from, A.ORDER_QUANTITY_ONE);
     const customer = await click(from, A.ORDER_CONFIRM);
     const pending = await db.order.findUniqueOrThrow({ where: { id: customer.currentOrderId! } });
     expect(pending).toMatchObject({ paymentStatus: 'PENDING', totalAmount: 20000 });

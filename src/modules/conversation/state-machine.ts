@@ -34,12 +34,17 @@ export function isEditableOrder(
 }
 
 export function firstMissingField(order: OrderData, maxQuantity: number): ConversationState | null {
+  if (!(order.selectedDiscIds?.length ?? (order.discId ? 1 : 0))) return 'ORDER_DISC';
+  if (
+    order.quantityConfirmed === false ||
+    !Number.isSafeInteger(order.quantity) ||
+    order.quantity < 1 ||
+    order.quantity > maxQuantity
+  )
+    return 'ORDER_QUANTITY';
+  if (!validText(order.city, 2, 100)) return 'ORDER_CITY';
   if (!validText(order.recipientName, 2, 80)) return 'ORDER_NAME';
   if (!order.recipientPhone || !normalizePhone(order.recipientPhone)) return 'ORDER_PHONE';
-  if (!validText(order.city, 2, 100)) return 'ORDER_CITY';
   if (!validText(order.address, 5, 300)) return 'ORDER_ADDRESS';
-  if (!(order.selectedDiscIds?.length ?? (order.discId ? 1 : 0))) return 'ORDER_DISC';
-  if (!Number.isSafeInteger(order.quantity) || order.quantity < 1 || order.quantity > maxQuantity)
-    return 'ORDER_QUANTITY';
   return null;
 }

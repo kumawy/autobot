@@ -237,6 +237,21 @@ export class Worker {
     const { db, env, provider } = this.deps;
     const job = await claimJob(db, env.MAX_RETRY_ATTEMPTS);
     if (!job) return false;
+    if (job.kind === 'WHATSAPP' && this.deps.whatsapp.isReady?.() === false) {
+      // A disconnected phone is not a failed send. Keep the queue until pairing/reconnection.
+      await db.outboxJob.updateMany({
+        where: { id: job.id, lockToken: job.lockToken, status: 'PROCESSING' },
+        data: {
+          status: 'RETRY',
+          attempts: { decrement: 1 },
+          nextAttemptAt: new Date(Date.now() + 30000),
+          lockedUntil: null,
+          lockToken: null,
+          lastError: 'WHATSAPP_DISCONNECTED',
+        },
+      });
+      return false;
+    }
     try {
       if (job.kind === 'WHATSAPP') {
         const customer = await db.customer.findUniqueOrThrow({ where: { id: job.customerId! } });
@@ -248,6 +263,7 @@ export class Worker {
           managerId?: string;
           origin?: string;
           handoffNotice?: boolean;
+          conversationVersion?: number;
           templateParameters?: string[];
         };
         if (
@@ -281,6 +297,7 @@ export class Worker {
               : [order.publicOrderId]
             : (payload.templateParameters ?? []),
           registry: parseTemplateRegistry(env.WHATSAPP_TEMPLATE_REGISTRY),
+          transport: env.WHATSAPP_TRANSPORT,
           isAiReply:
             !payload.handoffNotice && (payload.consultation === true || payload.origin === 'bot'),
           windowSafetySeconds: env.WHATSAPP_WINDOW_SAFETY_SECONDS,
@@ -322,7 +339,13 @@ export class Worker {
             type: message.type,
             content:
               'text' in message ? message.text : message.type === 'image' ? message.caption : null,
-            payload: json({ ...message, consultation: payload.consultation === true }),
+            payload: json({
+              ...message,
+              consultation: payload.consultation === true,
+              origin: payload.origin,
+              handoffNotice: payload.handoffNotice,
+              conversationVersion: payload.conversationVersion,
+            }),
             deliveryStatus: 'PENDING',
             ticketId: payload.ticketId,
             managerId: payload.managerId,
@@ -334,7 +357,9 @@ export class Worker {
         if (
           !payload.handoffNotice &&
           (payload.consultation || payload.origin === 'bot') &&
-          current.conversationState === 'HUMAN_HANDOFF'
+          (current.conversationState === 'HUMAN_HANDOFF' ||
+            (payload.conversationVersion !== undefined &&
+              payload.conversationVersion !== current.conversationVersion))
         )
           throw new BlockedError('STALE_AI');
         if (payload.purpose === 'operator_reply' && payload.ticketId) {

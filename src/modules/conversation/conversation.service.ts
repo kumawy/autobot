@@ -14,11 +14,27 @@ import {
   assertCheckoutReady,
   selectedDiscs,
   packageIssues,
+  deliverySnapshot,
 } from '../orders/checkout.js';
 import { normalizePhone } from '../../utils/phone.js';
 import type { AiService } from '../ai/ai.service.js';
+import { safeConsultationText } from '../ai/consultation-history.js';
 import type { CatalogService } from '../knowledge/catalog.service.js';
-import { calculateTotal, validText, validateOrder } from '../orders/order.validator.js';
+import {
+  calculateTotal,
+  parseOrderQuantity,
+  validText,
+  validateOrder,
+} from '../orders/order.validator.js';
+import {
+  isCustomerQuestion,
+  isPaymentProblem,
+  isOrderConfirmation,
+  isPaymentStatusRequest,
+  normalizeOrderText,
+  isRecipientName,
+  isCityName,
+} from './customer-input.js';
 import { WhatsAppActions as A } from './actions.js';
 import { firstMissingField, isEditableOrder, orderInputStates } from './state-machine.js';
 
@@ -77,6 +93,7 @@ export class ConversationService {
         'productId',
         'selectedDiscIds',
         'quantity',
+        'quantityConfirmed',
         'unitPrice',
         'subtotalAmount',
         'deliveryAmount',
@@ -107,10 +124,24 @@ export class ConversationService {
     };
     const { customer } = result;
     const text = input.message.text?.trim() ?? '';
-    const action =
+    let action =
       input.message.type === 'interactive' || input.message.type === 'button'
         ? input.message.actionId
         : undefined;
+    if (!action && customer.conversationState === 'ORDER_CONFIRMATION' && isOrderConfirmation(text))
+      action = A.ORDER_CONFIRM;
+    if (!action && customer.conversationState === 'ORDER_CONSENT') {
+      if (
+        /^(?:разрешить|разрешаю|да|согласен|согласна|рұқсат\s+беру|рұқсат\s+беремін|иә)[.!\s]*$/iu.test(
+          text,
+        )
+      )
+        action = A.NOTIFICATIONS_OPT_IN;
+      else if (
+        /^(?:нет|не\s+сейчас|пропустить|без\s+уведомлений|жоқ|кейін|өткізу)[.!\s]*$/iu.test(text)
+      )
+        action = A.NOTIFICATIONS_SKIP;
+    }
 
     const menuRequested =
       action === A.MENU || action === A.MENU_BACK || /^(меню|menu|мәзір|басты мәзір)$/iu.test(text);
@@ -165,10 +196,23 @@ export class ConversationService {
       });
       say(
         result,
-        'Разрешены последующие сообщения по заказу. Реклама не включена. Отказ: «стоп».',
-        'Тапсырыс бойынша кейінгі хабарламаларға рұқсат берілді. Жарнама кірмейді. Бас тарту: «тоқтату».',
+        'Буду сообщать об оплате и отправке заказа. Отключить эти уведомления можно словом «стоп».',
+        'Төлем мен тапсырыстың жіберілгені туралы хабарлаймын. Хабарламаларды «тоқтату» деп өшіруге болады.',
       );
-      this.currentPrompt(result);
+      if (customer.conversationState === 'ORDER_CONSENT') this.advance(result, 'ORDER_NAME');
+      else this.currentPrompt(result);
+      return result;
+    }
+    if (action === A.NOTIFICATIONS_SKIP) {
+      if (customer.conversationState !== 'ORDER_CONSENT') return this.staleAction(result);
+      customer.notificationConsent = false;
+      customer.optedOutAt = new Date();
+      say(
+        result,
+        'Хорошо, без последующих уведомлений. Статус оплаты можно спросить в чате. Продолжим оформление.',
+        'Жақсы, кейінгі хабарламаларсыз. Төлем күйін чатта сұрай аласыз. Тапсырысты жалғастырайық.',
+      );
+      this.advance(result, 'ORDER_NAME');
       return result;
     }
     if (action === A.PRIVACY || /^(конфиденциальность|политика|құпиялық)$/iu.test(text)) {
@@ -249,7 +293,12 @@ export class ConversationService {
       return result;
     }
     if (menuRequested) {
-      customer.previousState = customer.conversationState;
+      if (
+        orderInputStates.has(customer.conversationState) ||
+        customer.conversationState === 'ORDER_CONSENT' ||
+        customer.conversationState === 'ORDER_CONFIRMATION'
+      )
+        customer.previousState = customer.conversationState;
       customer.conversationState = 'MAIN_MENU';
       customer.editingField = null;
       this.menu(result);
@@ -360,9 +409,9 @@ export class ConversationService {
       )
         return this.staleAction(result);
       const order: OrderData = result.order;
-      if (!validateOrder(order, this.options.maxQuantity, 20000).valid)
-        return this.staleAction(result);
       try {
+        if (!validateOrder(order, this.options.maxQuantity, this.options.productPrice).valid)
+          throw new Error('CHECKOUT_AMOUNT_MISMATCH');
         assertCheckoutReady(order, {
           business: this.business,
           catalog: this.options.catalog,
@@ -484,18 +533,34 @@ export class ConversationService {
       );
       return result;
     }
-    if (result.order?.paymentStatus === 'PENDING' && /оплат|плат[её]ж|төле|төлем/iu.test(text)) {
+    if (isPaymentProblem(text)) return this.handoff(result, 'PAYMENT_PROBLEM');
+    if (result.order?.paymentStatus === 'PENDING' && isPaymentStatusRequest(text)) {
       this.pending(result);
       return result;
     }
-    if (orderInputStates.has(customer.conversationState)) return this.orderInput(result, text);
+    if (
+      orderInputStates.has(customer.conversationState) ||
+      customer.conversationState === 'ORDER_CONSENT'
+    ) {
+      if (isCustomerQuestion(text)) {
+        await this.answer(result, text, input.history, true);
+        return result;
+      }
+      if (customer.conversationState === 'ORDER_CONSENT') {
+        this.currentPrompt(result);
+        return result;
+      }
+      return this.orderInput(result, text);
+    }
     if (customer.conversationState === 'ORDER_CONFIRMATION') {
-      if (customer.editingField === 'select') this.editMenu(result);
+      if (isCustomerQuestion(text)) await this.answer(result, text, input.history, true);
+      else if (customer.editingField === 'select') this.editMenu(result);
       else this.summary(result);
       return result;
     }
     if (customer.conversationState === 'PAYMENT_PENDING') {
-      this.pending(result);
+      if (isPaymentStatusRequest(text)) this.pending(result);
+      else await this.answer(result, text, input.history, true);
       return result;
     }
     if (result.order?.paymentStatus === 'PAID' && /оплат|плат[её]ж|төле|төлем/iu.test(text)) {
@@ -524,6 +589,9 @@ export class ConversationService {
       text: this.business.notificationConsentText[lang(result)],
       buttons: [
         { id: A.NOTIFICATIONS_OPT_IN, title: choose(lang(result), 'Разрешить', 'Рұқсат беру') },
+        ...(result.customer.conversationState === 'ORDER_CONSENT'
+          ? [{ id: A.NOTIFICATIONS_SKIP, title: choose(lang(result), 'Не сейчас', 'Кейін') }]
+          : []),
       ],
     });
   }
@@ -555,9 +623,9 @@ export class ConversationService {
       const prior = result.customer.previousState;
       result.customer.conversationState = order.checkoutFrozenAt
         ? 'ORDER_CONFIRMATION'
-        : prior && orderInputStates.has(prior)
+        : prior && (orderInputStates.has(prior) || prior === 'ORDER_CONSENT')
           ? prior
-          : (firstMissingField(order, this.options.maxQuantity) ?? 'ORDER_CONFIRMATION');
+          : this.nextOrderStep(result);
     } else
       result.customer.conversationState = result.customer.preferredLanguage
         ? 'MAIN_MENU'
@@ -576,12 +644,13 @@ export class ConversationService {
       return;
     }
     const steps: ConversationState[] = [
-      'ORDER_NAME',
-      'ORDER_PHONE',
-      'ORDER_CITY',
-      'ORDER_ADDRESS',
       ...(this.business.packageMode === 'SELECTABLE_DISCS' ? ['ORDER_DISC' as const] : []),
       'ORDER_QUANTITY',
+      'ORDER_CITY',
+      'ORDER_CONSENT',
+      'ORDER_NAME',
+      'ORDER_PHONE',
+      'ORDER_ADDRESS',
       'ORDER_CONFIRMATION',
     ];
     const index = steps.indexOf(result.customer.conversationState);
@@ -625,8 +694,8 @@ export class ConversationService {
       type: 'buttons',
       text: choose(
         lang(result),
-        'Чем могу помочь?\nДля смены языка напишите «язык».',
-        'Қалай көмектесе аламын?\nТілді өзгерту үшін «тіл» деп жазыңыз.',
+        'Помогу выбрать музыкальную шкатулку и оформить заказ. Можно выбрать пункт или написать вопрос.\nДля смены языка напишите «язык».',
+        'Музыкалық қобдишаны таңдауға және тапсырыс беруге көмектесемін. Мәзірден таңдаңыз немесе сұрағыңызды жазыңыз.\nТілді өзгерту үшін «тіл» деп жазыңыз.',
       ),
       buttons: [
         { id: A.MENU_ORDER, title: choose(lang(result), '🛒 Заказать', '🛒 Тапсырыс') },
@@ -672,74 +741,80 @@ export class ConversationService {
 
   private discs(result: ConversationResult, requestedPage: number): void {
     const discs = this.options.catalog.discs(true);
-    if (result.customer.conversationState === 'ORDER_DISC' && result.order) {
-      const ids = selectedDiscs(result.order);
-      const names = ids
-        .map((id, index) => `${index + 1}. ${this.options.catalog.disc(id)?.title ?? id}`)
-        .join('\n');
-      result.messages.push({
-        type: 'buttons',
-        text: choose(
-          lang(result),
-          `Выбрано ${ids.length}/${this.business.includedDiscCount}:\n${names || 'Пока ничего'}\nВсе комплекты будут одинаковыми.`,
-          `Таңдалды ${ids.length}/${this.business.includedDiscCount}:\n${names || 'Әзірге бос'}\nБарлық жиынтық бірдей болады.`,
-        ).slice(0, 1000),
-        buttons: [
-          { id: A.DISC_DONE, title: choose(lang(result), 'Готово', 'Дайын') },
+    const choosing = result.customer.conversationState === 'ORDER_DISC' && result.order;
+    const ids = choosing ? selectedDiscs(result.order!) : [];
+    const controls: Extract<OutboundMessage, { type: 'list' }>['rows'] = choosing
+      ? [
+          ...(ids.length === this.business.includedDiscCount
+            ? [
+                {
+                  id: A.DISC_DONE,
+                  title: choose(lang(result), 'Готово, продолжить', 'Дайын, жалғастыру'),
+                },
+              ]
+            : []),
           ...(ids.length
             ? [
                 {
                   id: `${A.DISC_REMOVE_PREFIX}${ids.length - 1}`,
-                  title: choose(lang(result), 'Убрать последний', 'Соңғысын жою'),
+                  title: choose(lang(result), 'Убрать последнюю мелодию', 'Соңғы әуенді жою'),
                 },
               ]
             : []),
           { id: A.BACK, title: choose(lang(result), 'Назад', 'Артқа') },
-        ],
-      });
-    }
-    if (!discs.length) {
-      say(
-        result,
-        'Сейчас в каталоге нет доступных мелодий.',
-        'Қазір каталогта қолжетімді әуендер жоқ.',
-      );
-      return;
-    }
-    // Eight products plus previous/next navigation never exceed Meta's ten-row limit.
-    const pageSize = 8;
+        ]
+      : [{ id: A.MENU_BACK, title: choose(lang(result), 'В меню', 'Мәзірге') }];
+    const complete = Boolean(choosing && ids.length === this.business.includedDiscCount);
+    // One list gives every digit exactly one meaning; reserve room for controls and navigation.
+    const pageSize = 10 - controls.length - 2;
     const page = Math.min(requestedPage, Math.max(0, Math.ceil(discs.length / pageSize) - 1));
-    const rows: Extract<OutboundMessage, { type: 'list' }>['rows'] = discs
-      .slice(page * pageSize, (page + 1) * pageSize)
-      .map((disc) => ({
-        id: `${A.DISC_PREFIX}${disc.id}`,
-        title: disc.title.slice(0, 24),
-        ...(disc.artist ? { description: disc.artist.slice(0, 72) } : {}),
-      }));
-    if (page > 0)
+    const rows: Extract<OutboundMessage, { type: 'list' }>['rows'] = complete
+      ? []
+      : discs.slice(page * pageSize, (page + 1) * pageSize).map((disc) => ({
+          id: `${A.DISC_PREFIX}${disc.id}`,
+          title: disc.title.slice(0, 24),
+          ...(disc.artist ? { description: disc.artist.slice(0, 72) } : {}),
+        }));
+    if (!complete && page > 0)
       rows.push({
         id: `${A.DISC_PAGE_PREFIX}${page - 1}`,
-        title: choose(lang(result), '⬅️ Предыдущие', '⬅️ Алдыңғылары'),
+        title: choose(lang(result), 'Предыдущие мелодии', 'Алдыңғы әуендер'),
       });
-    if ((page + 1) * pageSize < discs.length)
+    if (!complete && (page + 1) * pageSize < discs.length)
       rows.push({
         id: `${A.DISC_PAGE_PREFIX}${page + 1}`,
-        title: choose(lang(result), 'Следующие ➡️', 'Келесілері ➡️'),
+        title: choose(lang(result), 'Следующие мелодии', 'Келесі әуендер'),
       });
+    rows.push(...controls);
+    const names = ids.map((id) => this.options.catalog.disc(id)?.title ?? id).join(', ');
+    const text = choosing
+      ? choose(
+          lang(result),
+          `Выберите мелодии для комплекта (нужно: ${this.business.includedDiscCount}).\nВыбрано ${ids.length}/${this.business.includedDiscCount}: ${names || 'пока ничего'}.${complete ? '\nЕсли выбор устраивает, нажмите «Готово».' : ''}`,
+          `Каталогтан ${this.business.includedDiscCount} әуен таңдаңыз.\nТаңдалды ${ids.length}/${this.business.includedDiscCount}: ${names || 'әзірге бос'}.${complete ? '\nТаңдау дұрыс болса, «Дайын» басыңыз.' : ''}`,
+        )
+      : choose(
+          lang(result),
+          'Выберите мелодию из доступного каталога.',
+          'Қолжетімді каталогтан әуен таңдаңыз.',
+        );
+    if (!discs.length)
+      say(
+        result,
+        'Сейчас нет доступных мелодий. Можно написать менеджеру.',
+        'Қазір қолжетімді әуендер жоқ. Кеңесшіге жаза аласыз.',
+      );
     result.messages.push({
       type: 'list',
-      text: choose(
-        lang(result),
-        'Выберите мелодию из доступного каталога.',
-        'Қолжетімді каталогтан әуен таңдаңыз.',
-      ),
-      button: choose(lang(result), 'Мелодии', 'Әуендер'),
+      text: text.slice(0, 1000),
+      button: choose(lang(result), 'Выбрать', 'Таңдау'),
       rows,
     });
   }
 
   private startOrder(result: ConversationResult): ConversationResult {
     const existing = result.order;
+    const creating = !isEditableOrder(existing);
     if (existing?.checkoutFrozenAt && existing.orderStatus === 'AWAITING_CONFIRMATION') {
       result.customer.conversationState = 'ORDER_CONFIRMATION';
       this.summary(result);
@@ -768,6 +843,7 @@ export class ConversationService {
         productId: this.options.catalog.product(lang(result)).id,
         discId: null,
         quantity: 1,
+        quantityConfirmed: false,
         unitPrice: this.options.productPrice,
         totalAmount: this.options.productPrice,
         currency: 'KZT',
@@ -775,8 +851,13 @@ export class ConversationService {
         paymentStatus: 'NOT_CREATED',
         paymentUrl: null,
         selectedDiscIds:
-          this.business.packageMode === 'FIXED_SET' ? [...this.business.fixedDiscIds] : [],
-        subtotalAmount: 20000,
+          this.business.packageMode === 'FIXED_SET'
+            ? [...this.business.fixedDiscIds]
+            : result.customer.selectedDiscId &&
+                this.options.catalog.disc(result.customer.selectedDiscId)?.available
+              ? [result.customer.selectedDiscId]
+              : [],
+        subtotalAmount: this.options.productPrice,
         deliveryAmount: 0,
         deliveryMode: this.business.deliveryMode,
         configVersion: this.business.configVersion,
@@ -791,8 +872,6 @@ export class ConversationService {
       (!this.business.privacyPolicyUrl || !this.business.businessContact)
     )
       return this.handoff(result, 'BUSINESS_CONFIGURATION_REQUIRED');
-    if (result.customer.privacyNoticeVersion !== this.business.privacyNoticeVersion)
-      this.privacyNotice(result);
     result.customer.currentOrderId = order.id;
     result.customer.editingField = null;
     if (selectedDiscs(order).some((id) => !this.options.catalog.disc(id)?.available)) {
@@ -803,11 +882,31 @@ export class ConversationService {
       order.selectedDiscIds = [...this.business.fixedDiscIds];
       order.discId = order.selectedDiscIds[0] ?? null;
     }
-    result.customer.conversationState =
-      firstMissingField(order, this.options.maxQuantity) ??
-      (order.orderStatus === 'DRAFT' ? 'ORDER_QUANTITY' : 'ORDER_CONFIRMATION');
+    const prior = result.customer.previousState;
+    const current = result.customer.conversationState;
+    result.customer.conversationState = creating
+      ? selectedDiscs(order).length === this.business.includedDiscCount
+        ? 'ORDER_QUANTITY'
+        : 'ORDER_DISC'
+      : orderInputStates.has(current) || current === 'ORDER_CONSENT'
+        ? current
+        : prior && (orderInputStates.has(prior) || prior === 'ORDER_CONSENT')
+          ? prior
+          : this.nextOrderStep(result);
+    result.customer.previousState = null;
     this.currentPrompt(result);
     return result;
+  }
+
+  private nextOrderStep(result: ConversationResult): ConversationState {
+    const missing = firstMissingField(result.order!, this.options.maxQuantity);
+    if (
+      missing === 'ORDER_NAME' &&
+      (result.customer.privacyNoticeVersion !== this.business.privacyNoticeVersion ||
+        (!result.customer.notificationConsentAt && !result.customer.optedOutAt))
+    )
+      return 'ORDER_CONSENT';
+    return missing ?? 'ORDER_CONFIRMATION';
   }
 
   private currentPrompt(result: ConversationResult): void {
@@ -817,11 +916,7 @@ export class ConversationService {
         this.languageButtons(result);
         break;
       case 'ORDER_NAME':
-        say(
-          result,
-          'Как зовут получателя? Укажите от 2 до 80 символов.',
-          'Алушының аты кім? 2–80 таңба енгізіңіз.',
-        );
+        say(result, 'Как зовут получателя?', 'Алушының аты кім?');
         break;
       case 'ORDER_PHONE':
         say(
@@ -840,8 +935,8 @@ export class ConversationService {
       case 'ORDER_ADDRESS':
         say(
           result,
-          'Укажите адрес доставки: улица, дом, квартира (от 5 до 300 символов).',
-          'Жеткізу мекенжайын жазыңыз: көше, үй, пәтер (5–300 таңба).',
+          'Куда доставить заказ? Напишите улицу, дом и квартиру. Можно в несколько строк.',
+          'Тапсырысты қайда жеткіземіз? Көше, үй және пәтерді жазыңыз. Бірнеше жолмен жазуға болады.',
         );
         break;
       case 'ORDER_DISC':
@@ -853,13 +948,16 @@ export class ConversationService {
           type: 'buttons',
           text: choose(
             lang(result),
-            `Сколько комплектов? Введите целое число от 1 до ${this.options.maxQuantity}.`,
-            `Қанша жиынтық қажет? 1-ден ${this.options.maxQuantity}-ға дейін бүтін сан енгізіңіз.`,
+            `Сколько комплектов хотите? Можно от 1 до ${this.options.maxQuantity}, например «2 комплекта». Все комплекты будут с одинаковыми мелодиями.`,
+            `Қанша жиынтық қажет? 1-ден ${this.options.maxQuantity}-ға дейін, мысалы «2 жиынтық». Барлық жиынтықтағы әуендер бірдей болады.`,
           ),
           buttons: [
             { id: A.ORDER_QUANTITY_ONE, title: choose(lang(result), '1 комплект', '1 жиынтық') },
           ],
         });
+        break;
+      case 'ORDER_CONSENT':
+        this.privacyNotice(result);
         break;
       case 'CANCEL_CONFIRMATION':
         this.cancelPrompt(result);
@@ -887,49 +985,81 @@ export class ConversationService {
   private orderInput(result: ConversationResult, text: string): ConversationResult {
     if (!isEditableOrder(result.order)) return this.staleAction(result);
     const order = result.order;
+    const normalized = normalizeOrderText(text);
     switch (result.customer.conversationState) {
       case 'ORDER_NAME':
-        if (!validText(text, 2, 80)) break;
-        order.recipientName = text;
+        if (!isRecipientName(normalized)) break;
+        order.recipientName = normalized;
         this.advance(result, 'ORDER_PHONE');
         return result;
       case 'ORDER_PHONE': {
         const phone = normalizePhone(text);
         if (!phone) break;
         order.recipientPhone = phone;
-        this.advance(result, 'ORDER_CITY');
+        this.advance(result, 'ORDER_ADDRESS');
         return result;
       }
       case 'ORDER_CITY':
-        if (!validText(text, 2, 100)) break;
-        order.city = text;
-        this.advance(result, 'ORDER_ADDRESS');
+        if (!isCityName(normalized)) break;
+        order.city = normalized;
+        try {
+          const delivery = deliverySnapshot(normalized, this.business);
+          say(
+            result,
+            `Товары: ${money(order.unitPrice * order.quantity)} ₸. ${delivery.mode === 'INCLUDED' ? 'Доставка включена.' : delivery.mode === 'FIXED_PREPAID' ? `Доставка: ${money(delivery.amount)} ₸.` : this.business.deliveryTerms.ru}`,
+            `Тауарлар: ${money(order.unitPrice * order.quantity)} ₸. ${delivery.mode === 'INCLUDED' ? 'Жеткізу бағаға кіреді.' : delivery.mode === 'FIXED_PREPAID' ? `Жеткізу: ${money(delivery.amount)} ₸.` : this.business.deliveryTerms.kk}`,
+          );
+        } catch {
+          return this.handoff(result, 'DELIVERY_TARIFF_UNKNOWN');
+        }
+        this.advance(result, this.nextOrderStep(result));
         return result;
       case 'ORDER_ADDRESS':
         if (!validText(text, 5, 300)) break;
-        order.address = text;
-        this.advance(
-          result,
-          this.business.packageMode === 'FIXED_SET' ? 'ORDER_QUANTITY' : 'ORDER_DISC',
-        );
+        order.address = normalized;
+        this.advance(result, this.nextOrderStep(result));
         return result;
       case 'ORDER_DISC':
         say(result, 'Выберите мелодию кнопкой из списка.', 'Әуенді тізімдегі батырмамен таңдаңыз.');
         this.discs(result, 0);
         return result;
       case 'ORDER_QUANTITY': {
-        if (!/^\d{1,5}$/.test(text)) break;
-        const quantity = Number(text);
-        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > this.options.maxQuantity)
-          break;
+        const quantity = parseOrderQuantity(text, this.options.maxQuantity);
+        if (quantity === null) break;
         order.quantity = quantity;
+        order.quantityConfirmed = true;
         order.unitPrice = this.options.productPrice;
         order.totalAmount = calculateTotal(quantity, order.unitPrice, this.options.maxQuantity);
-        this.advance(result, 'ORDER_CONFIRMATION');
+        order.subtotalAmount = order.totalAmount;
+        order.deliveryAmount = 0;
+        this.advance(result, this.nextOrderStep(result));
         return result;
       }
     }
-    say(result, 'Проверьте значение и попробуйте ещё раз.', 'Мәнді тексеріп, қайта енгізіңіз.');
+    const errors: Partial<Record<ConversationState, [string, string]>> = {
+      ORDER_NAME: [
+        'Напишите имя получателя, например «Арман».',
+        'Алушының атын жазыңыз, мысалы «Арман».',
+      ],
+      ORDER_PHONE: [
+        'Не получилось распознать номер. Напишите его с кодом страны, например +7 701 123 45 67.',
+        'Нөмір танылмады. Ел кодымен жазыңыз, мысалы +7 701 123 45 67.',
+      ],
+      ORDER_CITY: [
+        'Напишите название города, например «Алматы».',
+        'Қаланың атын жазыңыз, мысалы «Алматы».',
+      ],
+      ORDER_ADDRESS: [
+        'Укажите улицу, дом и квартиру, например «Абая 10, кв. 5».',
+        'Көше, үй және пәтерді жазыңыз, мысалы «Абай 10, 5-пәтер».',
+      ],
+      ORDER_QUANTITY: [
+        `Напишите количество от 1 до ${this.options.maxQuantity}, например «2 комплекта».`,
+        `1-ден ${this.options.maxQuantity}-ға дейін санын жазыңыз, мысалы «2 жиынтық».`,
+      ],
+    };
+    const error = errors[result.customer.conversationState];
+    if (error) say(result, ...error);
     this.currentPrompt(result);
     return result;
   }
@@ -937,8 +1067,7 @@ export class ConversationService {
   private advance(result: ConversationResult, next: ConversationState): void {
     if (result.customer.editingField) {
       result.customer.editingField = null;
-      result.customer.conversationState =
-        firstMissingField(result.order!, this.options.maxQuantity) ?? 'ORDER_CONFIRMATION';
+      result.customer.conversationState = this.nextOrderStep(result);
     } else result.customer.conversationState = next;
     this.currentPrompt(result);
   }
@@ -1047,8 +1176,8 @@ export class ConversationService {
     const url = result.order?.paymentUrl;
     say(
       result,
-      `Оплата пока не подтверждена платёжной системой. Сообщение «я оплатил» не подтверждает оплату. Как только получу подтверждение, сообщу вам.${url ? `\n\nСсылка на оплату: ${url}` : '\nСсылка на оплату готовится.'}`,
-      `Төлем жүйесі төлемді әлі растаған жоқ. «Төледім» деген хабарлама төлемді растамайды. Растау түскенде сізге хабарлаймын.${url ? `\n\nТөлем сілтемесі: ${url}` : '\nТөлем сілтемесі дайындалуда.'}`,
+      `Оплата пока не подтверждена платёжной системой.${result.customer.notificationConsent && !result.customer.optedOutAt ? ' Сообщу, когда получу подтверждение.' : ' Статус можно проверить сообщением «статус оплаты».'}${url ? `\n\nСсылка на оплату: ${url}` : '\nСсылка на оплату готовится.'} Если ссылка не работает, напишите об этом.`,
+      `Төлем жүйесі төлемді әлі растаған жоқ.${result.customer.notificationConsent && !result.customer.optedOutAt ? ' Растау келгенде хабарлаймын.' : ' Күйін «төлем күйі» деп сұрай аласыз.'}${url ? `\n\nТөлем сілтемесі: ${url}` : '\nТөлем сілтемесі дайындалуда.'} Сілтеме жұмыс істемесе, жазыңыз.`,
     );
   }
 
@@ -1096,12 +1225,45 @@ export class ConversationService {
     result: ConversationResult,
     text: string,
     history: Input['history'],
+    preserveStep = false,
   ): Promise<void> {
+    const privateValues = [
+      result.order?.recipientName,
+      result.order?.recipientPhone,
+      result.order?.address,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => {
+        const literal = normalizeOrderText(value)
+          .toLocaleLowerCase()
+          .replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        return new RegExp(`(?:^|[^\\p{L}\\p{N}])${literal}(?=$|[^\\p{L}\\p{N}])`, 'u');
+      });
+    const containsOrderData = (value: string) => {
+      const normalized = normalizeOrderText(value).toLocaleLowerCase();
+      return privateValues.some((privateValue) => privateValue.test(normalized));
+    };
+    const safeText = containsOrderData(text) ? null : safeConsultationText(text);
+    if (!safeText) {
+      say(
+        result,
+        'Контактные данные вводите на соответствующем шаге заказа. Вопрос можно написать без личных данных.',
+        'Байланыс деректерін тапсырыстың тиісті қадамында енгізіңіз. Сұрақты жеке деректерсіз жазыңыз.',
+      );
+      if (preserveStep) this.currentPrompt(result);
+      return;
+    }
+    const safeHistory = history?.flatMap((item) => {
+      const content = containsOrderData(item.content) ? null : safeConsultationText(item.content);
+      return content ? [{ ...item, content }] : [];
+    });
+    result.consultation = true;
+    result.consultationMessageIndexes = [];
     try {
       const answer = await this.options.ai.answer({
         language: lang(result),
-        text,
-        history,
+        text: safeText,
+        history: safeHistory,
         context: {
           customerId: result.customer.id,
           state: result.customer.conversationState,
@@ -1123,7 +1285,14 @@ export class ConversationService {
         this.handoff(result, 'AI_UNCERTAIN');
         return;
       }
-      if (answer.text) result.messages.push({ type: 'text', text: answer.text.slice(0, 4000) });
+      if (answer.text) {
+        result.consultationMessageIndexes.push(result.messages.length);
+        result.messages.push({ type: 'text', text: answer.text.slice(0, 4000) });
+      }
+      if (preserveStep) {
+        this.currentPrompt(result);
+        return;
+      }
       if (answer.action === 'start_order') {
         this.startOrder(result);
       } else if (answer.action === 'show_main_menu') {

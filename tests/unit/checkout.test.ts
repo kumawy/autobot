@@ -72,6 +72,55 @@ describe('approved checkout composition and delivery snapshots', () => {
     expect(() => assertCheckoutReady(prepared, { business, catalog, mode: 'demo' })).not.toThrow();
     expect(() => deliverySnapshot('Астана', business)).toThrow('DELIVERY_TARIFF_UNKNOWN');
   });
+  it('uses the displayed configured price in both languages for the complete checkout amount', () => {
+    const pricedCatalog = new CatalogService({ productPrice: 25000 });
+    const business = businessDataSchema.parse({
+      ...demo,
+      deliveryMode: 'FIXED_PREPAID',
+      deliveryTariffs: [{ cities: ['Алматы'], amount: 3500 }],
+    });
+    const prepared = order();
+    prepareCheckout(prepared, business, pricedCatalog, 10);
+    expect(pricedCatalog.product('ru').price).toBe(pricedCatalog.product('kk').price);
+    expect(prepared).toMatchObject({
+      unitPrice: 25000,
+      subtotalAmount: 50000,
+      deliveryAmount: 3500,
+      totalAmount: 53500,
+    });
+    expect(() =>
+      assertCheckoutReady(prepared, { business, catalog: pricedCatalog, mode: 'demo' }),
+    ).not.toThrow();
+    expect(() =>
+      assertCheckoutReady(
+        { ...prepared, unitPrice: 20000, subtotalAmount: 40000, totalAmount: 43500 },
+        { business, catalog: pricedCatalog, mode: 'demo' },
+      ),
+    ).toThrow('CHECKOUT_AMOUNT_MISMATCH');
+  });
+  it('rejects inconsistent localized prices without partially changing an order', () => {
+    const inconsistentCatalog = {
+      disc: (id: string) => catalog.disc(id),
+      product: (language: 'ru' | 'kk') => ({
+        ...catalog.product(language),
+        price: language === 'ru' ? 25000 : 20000,
+      }),
+    };
+    const prepared = order();
+    const before = structuredClone(prepared);
+    expect(() => prepareCheckout(prepared, demo, inconsistentCatalog, 10)).toThrow(
+      'CATALOG_PRICE_MISMATCH',
+    );
+    expect(prepared).toEqual(before);
+    prepareCheckout(prepared, demo, catalog, 10);
+    expect(() =>
+      assertCheckoutReady(prepared, {
+        business: demo,
+        catalog: inconsistentCatalog,
+        mode: 'demo',
+      }),
+    ).toThrow('CATALOG_PRICE_MISMATCH');
+  });
   it('validates exact disc counts, unavailable positions and explicit repeated-disc permission', () => {
     const business = { ...demo, includedDiscCount: 2 };
     expect(packageIssues([ids[0]!], business, catalog)).toContain('DISC_COUNT');
@@ -100,6 +149,14 @@ describe('approved checkout composition and delivery snapshots', () => {
         mode: 'demo',
       }),
     ).toThrow('STALE');
+    expect(() =>
+      assertCheckoutReady(prepared, {
+        business: demo,
+        catalog: new CatalogService({ productPrice: 25000 }),
+        mode: 'demo',
+      }),
+    ).toThrow('CHECKOUT_AMOUNT_MISMATCH');
+    expect(prepared).toEqual(before);
   });
   it('keeps consultation/callback initialization available with missing config but closes the payment gate', () => {
     expect(() => loadBusinessData({ dataDir: '/definitely-missing-business-data' })).toThrow();

@@ -4,6 +4,14 @@ import type { DeliverySnapshot, OrderData, PackageSnapshot } from '../../types/d
 import type { CatalogService } from '../knowledge/catalog.service.js';
 import { calculateTotal } from './order.validator.js';
 type Catalog = Pick<CatalogService, 'disc' | 'product'>;
+
+function catalogUnitPrice(catalog: Catalog): number {
+  const ru = catalog.product('ru');
+  const kk = catalog.product('kk');
+  if (ru.price !== kk.price) throw new Error('CATALOG_PRICE_MISMATCH');
+  return calculateTotal(1, ru.price);
+}
+
 export function selectedDiscs(order: OrderData): string[] {
   return order.selectedDiscIds ?? (order.discId ? [order.discId] : []);
 }
@@ -54,6 +62,7 @@ export function prepareCheckout(
     business.packageMode === 'FIXED_SET' ? [...business.fixedDiscIds] : selectedDiscs(order);
   const issues = packageIssues(ids, business, catalog);
   if (issues.length) throw new Error(issues.join(','));
+  const unitPrice = catalogUnitPrice(catalog);
   const packageSnapshot: PackageSnapshot = {
     packageMode: business.packageMode,
     includedDiscCount: business.includedDiscCount,
@@ -64,7 +73,7 @@ export function prepareCheckout(
     demo: business.demo,
   };
   const delivery = deliverySnapshot(order.city ?? '', business);
-  const subtotal = calculateTotal(order.quantity, 20000, maxQuantity);
+  const subtotal = calculateTotal(order.quantity, unitPrice, maxQuantity);
   if (!Number.isSafeInteger(subtotal + delivery.amount)) throw new Error('INVALID_TOTAL');
   Object.assign(order, {
     selectedDiscIds: ids,
@@ -74,7 +83,7 @@ export function prepareCheckout(
     subtotalAmount: subtotal,
     deliveryAmount: delivery.amount,
     deliveryMode: delivery.mode,
-    unitPrice: 20000,
+    unitPrice,
     totalAmount: subtotal + delivery.amount,
     currency: 'KZT',
     configVersion: business.configVersion,
@@ -96,9 +105,11 @@ export function assertCheckoutReady(
   if (packageIssues(selectedDiscs(order), context.business, context.catalog).length)
     throw new Error('PACKAGE_UNAVAILABLE');
   const delivery = deliverySnapshot(order.city ?? '', context.business);
+  const unitPrice = catalogUnitPrice(context.catalog);
+  const subtotal = calculateTotal(order.quantity, unitPrice, Number.MAX_SAFE_INTEGER);
   if (
-    order.unitPrice !== 20000 ||
-    order.subtotalAmount !== 20000 * order.quantity ||
+    order.unitPrice !== unitPrice ||
+    order.subtotalAmount !== subtotal ||
     order.deliveryAmount !== delivery.amount ||
     order.totalAmount !== order.subtotalAmount + order.deliveryAmount ||
     order.currency !== 'KZT'

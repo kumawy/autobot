@@ -121,6 +121,7 @@ model Order {
   discTitle               String?
   productName             String
   quantity                Int              @default(1)
+  quantityConfirmed       Boolean          @default(false)
   unitPrice               Int
   totalAmount             Int
   currency                String           @default("KZT")
@@ -179,6 +180,24 @@ model PaymentAttempt {
   @@unique([provider, externalPaymentId])
   @@unique([provider, merchantId, externalPaymentId])
   @@index([orderId, createdAt])
+}
+
+// One leased gateway owns a number; encrypted Signal credentials survive redeployments.
+model WhatsAppSession {
+  id          String    @id
+  ownerToken  String?
+  leaseUntil  DateTime?
+  activatedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model WhatsAppAuthRecord {
+  sessionId String
+  key       String
+  value     String
+
+  @@id([sessionId, key])
 }
 
 model Message {

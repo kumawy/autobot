@@ -157,17 +157,21 @@ async function snapshot(from: string): Promise<Snapshot> {
   expect(response.statusCode, response.body).toBe(200);
   return response.json<Snapshot>();
 }
-async function confirmation(from: string, language: Language = 'ru'): Promise<Snapshot> {
+async function recipient(from: string, language: Language = 'ru'): Promise<Snapshot> {
   await text(from, 'Здравствуйте');
   await click(from, language === 'ru' ? A.LANG_RU : A.LANG_KK);
   await click(from, A.MENU_ORDER);
-  await text(from, 'Арман');
-  await text(from, '+7 (701) 123-45-67');
-  await text(from, 'Алматы');
-  await text(from, 'Абая 10, квартира 12');
   await click(from, `${A.DISC_PREFIX}${runtime.catalog.discs()[0]!.id}`);
   await click(from, A.DISC_DONE);
-  return text(from, '2');
+  await text(from, '2');
+  await text(from, 'Алматы');
+  return click(from, A.NOTIFICATIONS_SKIP);
+}
+async function confirmation(from: string, language: Language = 'ru'): Promise<Snapshot> {
+  await recipient(from, language);
+  await text(from, 'Арман');
+  await text(from, '+7 (701) 123-45-67');
+  return text(from, 'Абая 10, квартира 12');
 }
 async function pending(from: string, language: Language = 'ru'): Promise<Snapshot> {
   await confirmation(from, language);
@@ -580,9 +584,7 @@ describe('PostgreSQL-backed WhatsApp sales workflow', () => {
 
   it('restores draft fields and unprocessed inbound events after restarting the application', async () => {
     const from = phone();
-    await text(from, 'Здравствуйте');
-    await click(from, A.LANG_RU);
-    await click(from, A.MENU_ORDER);
+    await recipient(from);
     const draft = await text(from, 'Арман');
     const pendingId = `restart.${randomUUID()}`;
     await runtime.inbox.receive([{ id: pendingId, from, type: 'text', text: '+77011234567' }]);
@@ -593,30 +595,31 @@ describe('PostgreSQL-backed WhatsApp sales workflow', () => {
     expect(restored.orders[0]?.id).toBe(draft.orders[0]?.id);
     expect(restored.orders[0]?.recipientName).toBe('Арман');
     expect(restored.orders[0]?.recipientPhone).toBe('+77011234567');
-    expect(restored.customer.conversationState).toBe('ORDER_CITY');
+    expect(restored.customer.conversationState).toBe('ORDER_ADDRESS');
     expect(await db.message.count({ where: { whatsappMessageId: pendingId } })).toBe(1);
   });
 
   it('uses database locks to preserve message order across two independent workers', async () => {
     const from = phone();
+    await recipient(from);
     const second = await buildApp({ db, env, sheets, startWorker: false, logger: false });
     try {
       const messages: InboundMessage[] = [
-        { id: randomUUID(), from, type: 'text', text: 'Здравствуйте' },
-        { id: randomUUID(), from, type: 'text', text: 'русский' },
-        { id: randomUUID(), from, type: 'text', text: 'заказать' },
         { id: randomUUID(), from, type: 'text', text: 'Арман' },
+        { id: randomUUID(), from, type: 'text', text: '+77011234567' },
       ];
       await runtime.inbox.receive(messages.map((m) => ({ ...m, timestamp: Date.now() / 1000 })));
       await Promise.all([runtime.worker.drain(), second.worker.drain()]);
       await runtime.worker.drain();
       const result = await snapshot(from);
-      expect(result.customer.conversationState).toBe('ORDER_PHONE');
+      expect(result.customer.conversationState).toBe('ORDER_ADDRESS');
       expect(result.orders).toHaveLength(1);
       expect(result.orders[0]?.recipientName).toBe('Арман');
+      expect(result.orders[0]?.recipientPhone).toBe('+77011234567');
       const received = result.messages
         .filter((message) => message.direction === 'inbound')
-        .map((message) => message.whatsappMessageId);
+        .map((message) => message.whatsappMessageId)
+        .slice(-messages.length);
       expect(received).toEqual(messages.map((message) => message.id));
       expect(
         result.messages.filter((message) => message.direction === 'outbound').length,

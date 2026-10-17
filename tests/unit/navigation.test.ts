@@ -48,21 +48,32 @@ function session(businessPatch: Partial<BusinessDataConfig> = {}) {
     }));
   const click = (actionId: string) => send(undefined, actionId);
   const input = (text: string) => send(text);
-  const address = async () => {
+  const selection = async () => {
     await click(A.MENU_ORDER);
-    await input('Арман');
-    await input('+77011234567');
-    await input('Алматы');
-    return input('Абая 10');
-  };
-  const summary = async () => {
-    await address();
     if (business.packageMode === 'SELECTABLE_DISCS') {
       for (let i = 0; i < business.includedDiscCount; i++)
         await click(A.DISC_PREFIX + catalog.discs()[i]!.id);
       await click(A.DISC_DONE);
     }
-    return input('2');
+    return value;
+  };
+  const consent = async () => {
+    await selection();
+    await input('2');
+    return input('Алматы');
+  };
+  const nameStep = async () => {
+    await consent();
+    return click(A.NOTIFICATIONS_SKIP);
+  };
+  const address = async () => {
+    await nameStep();
+    await input('Арман');
+    return input('+77011234567');
+  };
+  const summary = async () => {
+    await address();
+    return input('Абая 10');
   };
   return {
     catalog,
@@ -71,6 +82,9 @@ function session(businessPatch: Partial<BusinessDataConfig> = {}) {
     click,
     input,
     address,
+    selection,
+    consent,
+    nameStep,
     summary,
     current: () => value,
     replace: (next: ConversationResult) => {
@@ -80,18 +94,105 @@ function session(businessPatch: Partial<BusinessDataConfig> = {}) {
 }
 
 describe('v1.1 conversation navigation and consent', () => {
+  it.each(['не сейчас', 'нет', 'кейін', 'жоқ'])(
+    'allows declining notifications without blocking checkout: %s',
+    async (answer) => {
+      const f = session();
+      await f.consent();
+      const result = await f.input(answer);
+      expect(result.customer.conversationState).toBe('ORDER_NAME');
+      expect(result.customer.notificationConsent).not.toBe(true);
+      expect(result.order?.recipientName).toBeNull();
+      expect((await f.input('Арман')).customer.conversationState).toBe('ORDER_PHONE');
+    },
+  );
+  it.each(['разрешить', 'рұқсат беру'])(
+    'records explicit text opt-in only at the consent step: %s',
+    async (answer) => {
+      const f = session();
+      await f.consent();
+      const result = await f.input(answer);
+      expect(result.customer.conversationState).toBe('ORDER_NAME');
+      expect(result.customer.notificationConsent).toBe(true);
+      expect(result.customer.notificationConsentAt).toBeInstanceOf(Date);
+      expect(result.order?.recipientName).toBeNull();
+    },
+  );
+  it('restores an unfinished quantity after leaving shopping for the menu', async () => {
+    const f = session();
+    await f.selection();
+    const order = structuredClone(f.current().order);
+    expect(order?.quantity).toBe(1);
+    await f.click(A.MENU);
+    const resumed = await f.click(A.MENU_ORDER);
+    expect(resumed.customer.conversationState).toBe('ORDER_QUANTITY');
+    expect(resumed.order).toEqual(order);
+  });
+  it.each(['menu', 'product'] as const)(
+    'still requires explicit quantity after repeated %s detours and a manager handoff',
+    async (detour) => {
+      const f = session();
+      await f.selection();
+      const before = structuredClone(f.current().order);
+      expect(before?.quantity).toBe(1);
+      expect(before?.quantityConfirmed).toBe(false);
+      await f.click(A.MENU);
+      await f.click(A.MENU);
+      if (detour === 'product') await f.click(A.MENU_PRODUCT);
+      expect((await f.click(A.MANAGER)).customer.conversationState).toBe('HUMAN_HANDOFF');
+      const resumed = await f.click(A.RESUME_BOT);
+      expect(resumed.resumeBot).toBe(true);
+      expect(resumed.customer.conversationState).toBe('ORDER_QUANTITY');
+      expect(resumed.order).toEqual(before);
+      const selected = await f.input('2 комплекта');
+      expect(selected.customer.conversationState).toBe('ORDER_CITY');
+      expect(selected.order?.quantity).toBe(2);
+      expect(selected.order?.quantityConfirmed).toBe(true);
+      await f.click(A.MENU);
+      await f.click(A.MENU);
+      await f.click(A.MENU_PRODUCT);
+      const restored = await f.click(A.MENU_ORDER);
+      expect(restored.customer.conversationState).toBe('ORDER_CITY');
+      expect(restored.order?.id).toBe(before?.id);
+      expect(restored.order?.quantity).toBe(2);
+      expect(restored.order?.quantityConfirmed).toBe(true);
+    },
+  );
+  it('moves back through recipient data, consent, city, quantity and selection without erasing values', async () => {
+    const f = session();
+    await f.summary();
+    const order = structuredClone(f.current().order);
+    for (const expected of [
+      'ORDER_ADDRESS',
+      'ORDER_PHONE',
+      'ORDER_NAME',
+      'ORDER_CONSENT',
+      'ORDER_CITY',
+      'ORDER_QUANTITY',
+      'ORDER_DISC',
+    ]) {
+      expect((await f.input('назад')).customer.conversationState).toBe(expected);
+      expect(f.current().order).toEqual(order);
+    }
+  });
   it('shows privacy before collecting data and records separate notification opt-in and STOP', async () => {
     const f = session();
-    const start = await f.click(A.MENU_ORDER);
+    const shopping = await f.click(A.MENU_ORDER);
+    expect(shopping.order?.recipientName).toBeNull();
+    const start = await f.consent();
+    expect(start.customer.conversationState).toBe('ORDER_CONSENT');
     expect(start.customer.privacyNoticeVersion).toBe(f.business.privacyNoticeVersion);
     expect(start.customer.notificationConsent).not.toBe(true);
-    expect(start.messages[0]?.type === 'text' && start.messages[0].text).toContain(
-      'Для оформления понадобятся',
-    );
+    expect(
+      start.messages.some(
+        (message) => message.type === 'text' && message.text.includes('Для оформления понадобятся'),
+      ),
+    ).toBe(true);
     expect((await f.click(A.NOTIFICATIONS_OPT_IN)).customer).toMatchObject({
       notificationConsent: true,
       notificationConsentScope: 'ORDER_TRANSACTIONAL',
       notificationConsentSource: 'WHATSAPP_EXPLICIT_BUTTON',
+      conversationState: 'ORDER_NAME',
     });
     const stopped = await f.input('стоп');
     expect(stopped.customer.notificationConsent).toBe(false);
@@ -115,21 +216,18 @@ describe('v1.1 conversation navigation and consent', () => {
   });
   it('BACK changes only the editable step and does not erase values or advance financial status', async () => {
     const f = session();
-    await f.address();
+    await f.summary();
     const before = structuredClone(f.current().order);
     expect((await f.input('назад')).customer.conversationState).toBe('ORDER_ADDRESS');
     expect(f.current().order).toEqual(before);
     await f.input('Абая 12');
-    await f.click(A.DISC_PREFIX + f.catalog.discs()[0]!.id);
-    await f.click(A.DISC_DONE);
-    await f.input('1');
     const frozen = await f.click(A.ORDER_CONFIRM);
     expect((await f.input('артқа')).customer.conversationState).toBe('PAYMENT_PENDING');
     expect(f.current().order).toEqual(frozen.order);
   });
   it('MENU during handoff shows ticket status, explicit resume restores a valid step without AI', async () => {
     const f = session();
-    await f.click(A.MENU_ORDER);
+    await f.nameStep();
     await f.input('Арман');
     await f.click(A.MANAGER);
     const menu = await f.input('меню');
@@ -165,7 +263,9 @@ describe('v1.1 conversation navigation and consent', () => {
     const f = session();
     const started = await f.click(A.MENU_ORDER);
     const initial = started.order!.contentVersion!;
-    expect((await f.input('Арман')).order?.contentVersion).toBe(initial + 1);
+    expect((await f.click(A.DISC_PREFIX + f.catalog.discs()[0]!.id)).order?.contentVersion).toBe(
+      initial + 1,
+    );
     const rendered = await f.click(A.LANG_KK);
     expect(rendered.order?.contentVersion).toBe(initial + 1);
     expect(rendered.order?.version).toBe(initial + 1);
@@ -173,9 +273,25 @@ describe('v1.1 conversation navigation and consent', () => {
 });
 
 describe('v1.1 package wizard', () => {
+  it('renders one numbered selection list with shared finish, remove and back controls', async () => {
+    const f = session();
+    await f.click(A.MENU_ORDER);
+    const result = await f.click(A.DISC_PREFIX + f.catalog.discs()[0]!.id);
+    const menus = result.messages.filter(
+      (message) => message.type === 'list' || message.type === 'buttons',
+    );
+    expect(menus).toHaveLength(1);
+    const list = menus[0];
+    expect(list?.type).toBe('list');
+    if (list?.type !== 'list') throw new Error('Expected one melody selection list');
+    expect(list.rows.length).toBeLessThanOrEqual(10);
+    expect(list.rows.map((row) => row.id)).toEqual(
+      expect.arrayContaining([A.DISC_DONE, `${A.DISC_REMOVE_PREFIX}0`, A.BACK]),
+    );
+  });
   it('adds, removes and explicitly finishes exactly the configured number of discs', async () => {
     const f = session({ includedDiscCount: 2 });
-    await f.address();
+    await f.click(A.MENU_ORDER);
     const [first, second] = f.catalog.discs();
     await f.click(A.DISC_PREFIX + first!.id);
     expect((await f.click(A.DISC_DONE)).customer.conversationState).toBe('ORDER_DISC');
@@ -186,7 +302,12 @@ describe('v1.1 package wizard', () => {
     expect(f.current().order?.selectedDiscIds).toEqual([second!.id]);
     await f.click(A.DISC_PREFIX + first!.id);
     expect((await f.click(A.DISC_DONE)).customer.conversationState).toBe('ORDER_QUANTITY');
-    const result = await f.input('2');
+    await f.input('2');
+    await f.input('Алматы');
+    await f.click(A.NOTIFICATIONS_SKIP);
+    await f.input('Арман');
+    await f.input('+77011234567');
+    const result = await f.input('Абая 10');
     expect(result.order?.packageSnapshot?.discs).toHaveLength(2);
     expect(result.order?.totalAmount).toBe(40000);
     expect(JSON.stringify(result.messages)).toContain('одинаковый состав');
@@ -204,8 +325,8 @@ describe('v1.1 package wizard', () => {
       deliveryMode: 'FIXED_PREPAID',
       deliveryTariffs: [{ cities: ['Алматы'], amount: 2500 }],
     });
-    expect((await f.address()).customer.conversationState).toBe('ORDER_QUANTITY');
-    expect((await f.input('2')).order).toMatchObject({
+    expect((await f.click(A.MENU_ORDER)).customer.conversationState).toBe('ORDER_QUANTITY');
+    expect((await f.summary()).order).toMatchObject({
       selectedDiscIds: ids,
       subtotalAmount: 40000,
       deliveryAmount: 2500,
@@ -217,7 +338,7 @@ describe('v1.1 package wizard', () => {
       deliveryMode: 'FIXED_PREPAID',
       deliveryTariffs: [{ cities: ['Астана'], amount: 2500 }],
     });
-    const result = await f.summary();
+    const result = await f.consent();
     expect(result.customer.conversationState).toBe('HUMAN_HANDOFF');
     expect(result.handoff?.reason).toBe('DELIVERY_TARIFF_UNKNOWN');
     expect((await f.click(A.ORDER_CONFIRM)).createPayment).toBeUndefined();

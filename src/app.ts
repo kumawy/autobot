@@ -19,6 +19,8 @@ import {
   type WhatsAppTransport,
 } from './modules/whatsapp/whatsapp.client.js';
 import { parseWebhook } from './modules/whatsapp/whatsapp.parser.js';
+import { BaileysWhatsAppClient } from './modules/whatsapp/baileys.client.js';
+import QRCode from 'qrcode';
 import { MockPaymentProvider } from './modules/payments/mock.provider.js';
 import { FreedomPayProvider } from './modules/payments/freedompay.provider.js';
 import { PaymentService, PaymentValidationError } from './modules/payments/payment.service.js';
@@ -61,6 +63,8 @@ export interface AppOptions {
   sheets?: SheetsService;
   notifications?: NotificationService;
   startWorker?: boolean;
+  startWhatsApp?: boolean;
+  baileysSocketFactory?: ConstructorParameters<typeof BaileysWhatsAppClient>[0]['socketFactory'];
   logger?: boolean;
 }
 export async function buildApp(options: AppOptions = {}) {
@@ -197,15 +201,6 @@ export async function buildApp(options: AppOptions = {}) {
           timeoutMs: 15000,
           maxTools: env.AI_MAX_TOOL_CALLS,
         }));
-  const whatsapp =
-    options.whatsapp ??
-    (env.INTEGRATION_MODE === 'demo'
-      ? new DemoWhatsAppClient()
-      : new WhatsAppClient({
-          accessToken: env.WHATSAPP_ACCESS_TOKEN,
-          phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
-          graphApiVersion: env.WHATSAPP_GRAPH_API_VERSION,
-        }));
   const provider: PaymentProvider =
     options.provider ??
     (env.PAYMENT_PROVIDER === 'mock'
@@ -265,7 +260,7 @@ export async function buildApp(options: AppOptions = {}) {
     productPrice: env.PRODUCT_PRICE_KZT,
     maxQuantity: env.MAX_ORDER_QUANTITY,
     processFirstMessageAfterLanguage: env.PROCESS_FIRST_MESSAGE_AFTER_LANGUAGE,
-    managerHandoffEnabled: env.MANAGER_HANDOFF_ENABLED,
+    managerHandoffEnabled: env.MANAGER_HANDOFF_ENABLED || env.WHATSAPP_TRANSPORT === 'baileys',
   });
   const inbox = new WhatsAppService(
     db,
@@ -276,6 +271,42 @@ export async function buildApp(options: AppOptions = {}) {
     { handoff, merchantId: provider.merchantId },
   );
   const payments = new PaymentService(db);
+  const whatsapp: WhatsAppTransport =
+    options.whatsapp ??
+    (env.WHATSAPP_TRANSPORT === 'baileys'
+      ? new BaileysWhatsAppClient({
+          db,
+          env,
+          inbox,
+          socketFactory: options.baileysSocketFactory,
+          onState: (state) => {
+            app.log.info({ event: 'whatsapp_connection', state });
+            if (
+              env.TELEGRAM_ENABLED &&
+              ['logged_out', 'number_mismatch', 'storage_error'].includes(state)
+            )
+              void db
+                .$transaction((tx) =>
+                  enqueue(tx, {
+                    key: `whatsapp-connection:${env.WHATSAPP_SESSION_ID}:${state}:${Math.floor(Date.now() / 3600000)}`,
+                    kind: 'TELEGRAM',
+                    payload: {
+                      text: `Подключение WhatsApp требует проверки: ${state}. Откройте ${env.APP_BASE_URL}/whatsapp/connect`,
+                    },
+                  }),
+                )
+                .catch(() => app.log.error({ event: 'whatsapp_alert_failed' }));
+          },
+          onError: () => app.log.error({ event: 'whatsapp_gateway_error' }),
+        })
+      : env.INTEGRATION_MODE === 'demo'
+        ? new DemoWhatsAppClient()
+        : new WhatsAppClient({
+            accessToken: env.WHATSAPP_ACCESS_TOKEN,
+            phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
+            graphApiVersion: env.WHATSAPP_GRAPH_API_VERSION,
+          }));
+  const baileys = whatsapp instanceof BaileysWhatsAppClient ? whatsapp : null;
   const worker = new Worker({
     db,
     env,
@@ -298,6 +329,8 @@ export async function buildApp(options: AppOptions = {}) {
       }
     });
   app.get('/webhooks/whatsapp', async (req, reply) => {
+    if (env.WHATSAPP_TRANSPORT === 'baileys')
+      return reply.status(404).send({ error: 'Not configured' });
     const query = z
       .object({
         'hub.mode': z.string(),
@@ -315,6 +348,8 @@ export async function buildApp(options: AppOptions = {}) {
     return reply.type('text/plain').send(query.data['hub.challenge']);
   });
   app.post('/webhooks/whatsapp', async (req, reply) => {
+    if (env.WHATSAPP_TRANSPORT === 'baileys')
+      return reply.status(404).send({ error: 'Not configured' });
     const signature = req.headers['x-hub-signature-256'];
     if (
       !verifyMetaSignature(
@@ -467,10 +502,38 @@ export async function buildApp(options: AppOptions = {}) {
   await app.register(
     async (admin) => {
       admin.addHook('onRequest', async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
         if (!safeEqual(req.headers.authorization ?? '', `Bearer ${env.ADMIN_TOKEN}`))
           return reply.status(401).send({ error: 'Unauthorized' });
       });
       const idSchema = z.object({ id: z.string().uuid() });
+      admin.get(
+        '/whatsapp/status',
+        async () =>
+          baileys?.status() ?? { transport: env.INTEGRATION_MODE === 'demo' ? 'demo' : 'cloud' },
+      );
+      admin.get('/whatsapp/qr', async (_req, reply) => {
+        const qr = baileys?.pairingQr();
+        if (!qr) return reply.status(409).send({ error: 'QR is not currently available' });
+        return { dataUrl: await QRCode.toDataURL(qr, { width: 320, margin: 2 }) };
+      });
+      admin.post('/whatsapp/reconnect', async (_req, reply) => {
+        if (!baileys) return reply.status(404).send({ error: 'Not configured' });
+        await baileys.reconnect();
+        return baileys.status();
+      });
+      admin.get('/whatsapp/conversations', async () =>
+        db.customer.findMany({
+          take: 100,
+          orderBy: { updatedAt: 'desc' },
+          select: { id: true, whatsappId: true, conversationState: true, preferredLanguage: true },
+        }),
+      );
+      admin.post('/customers/:id/pause-bot', async (req) => {
+        const customerId = idSchema.parse(req.params).id;
+        await db.$transaction((tx) => handoff.open(tx, { customerId, reason: 'OWNER_PAUSE' }));
+        return { paused: true };
+      });
       admin.get('/status', async () => {
         const [jobs, inboxCounts, pendingPayments, incidents, handoffs, heartbeats, sheetLag] =
           await Promise.all([
@@ -896,12 +959,42 @@ export async function buildApp(options: AppOptions = {}) {
       { prefix: '/dev' },
     );
   } else app.get('/', async () => ({ service: 'music-box-ai-sales-agent', status: 'running' }));
+  if (baileys) {
+    app.get('/whatsapp/connect', async (_req, reply) =>
+      reply
+        .header('Cache-Control', 'no-store')
+        .type('text/html')
+        .send(await readFile('public/whatsapp-connect.html', 'utf8')),
+    );
+    app.get('/whatsapp/connect.js', async (_req, reply) =>
+      reply
+        .type('application/javascript')
+        .send(await readFile('public/whatsapp-connect.js', 'utf8')),
+    );
+    app.addHook('onReady', async () => {
+      if (options.startWhatsApp === true) await baileys.start();
+    });
+  }
   if (options.startWorker === true) worker.start();
   app.addHook('onClose', async () => {
     await worker.stop();
+    await baileys?.stop();
     if (!options.db) await db.$disconnect();
   });
-  return { app, db, worker, provider, payments, inbox, env, catalog, handoff, sheets, business };
+  return {
+    app,
+    db,
+    worker,
+    provider,
+    payments,
+    inbox,
+    env,
+    catalog,
+    handoff,
+    sheets,
+    business,
+    whatsapp,
+  };
 }
 function paymentPage(title: string, description: string, extra = '') {
   return `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p>${extra}</main></body></html>`;

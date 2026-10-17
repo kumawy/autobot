@@ -5,6 +5,7 @@ export interface SendMetadata {
   correlationId?: string;
 }
 export interface WhatsAppTransport {
+  isReady?(): boolean;
   send(to: string, message: OutboundMessage, metadata?: SendMetadata): Promise<string>;
   markAsRead(id: string): Promise<void>;
 }

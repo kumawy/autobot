@@ -25,13 +25,18 @@ function customer(language: Language | null = 'ru'): CustomerData {
     editingField: null,
   };
 }
-function fixture(language: Language | null = 'ru', replay = true, managerHandoffEnabled = true) {
-  const catalog = new CatalogService({ productPrice: 20000 });
+function fixture(
+  language: Language | null = 'ru',
+  replay = true,
+  managerHandoffEnabled = true,
+  productPrice = 20000,
+) {
+  const catalog = new CatalogService({ productPrice });
   const answer = vi.fn(async (_input: AiInput): Promise<AiAnswer> => ({ text: 'Цена 20 000 ₸.' }));
   const service = new ConversationService({
     catalog,
     ai: { answer },
-    productPrice: 20000,
+    productPrice,
     maxQuantity: 10,
     processFirstMessageAfterLanguage: replay,
     managerHandoffEnabled,
@@ -48,17 +53,35 @@ function fixture(language: Language | null = 'ru', replay = true, managerHandoff
   };
   const click = (actionId: string) => send({ type: 'interactive', actionId });
   const text = (value: string) => send({ type: 'text', text: value });
-  const complete = async () => {
+  const selection = async () => {
     await click(A.MENU_ORDER);
+    await click(`${A.DISC_PREFIX}${catalog.discs()[0]!.id}`);
+    return click(A.DISC_DONE);
+  };
+  const nameStep = async () => {
+    await selection();
+    await text('2');
+    await text('Алматы');
+    return click(A.NOTIFICATIONS_SKIP);
+  };
+  const complete = async () => {
+    await nameStep();
     await text('Арман');
     await text('8 701 123 45 67');
-    await text('Алматы');
-    await text('Абая 10, квартира 12');
-    await click(`${A.DISC_PREFIX}${catalog.discs()[0]!.id}`);
-    await click(A.DISC_DONE);
-    return text('2');
+    return text('Абая 10, квартира 12');
   };
-  return { service, catalog, answer, send, click, text, complete, current: () => result };
+  return {
+    service,
+    catalog,
+    answer,
+    send,
+    click,
+    text,
+    selection,
+    nameStep,
+    complete,
+    current: () => result,
+  };
 }
 
 describe('language and safe routing', () => {
@@ -66,7 +89,7 @@ describe('language and safe routing', () => {
     'resumes a legacy handoff in %s without consuming the triggering text as a field',
     async (language) => {
       const f = fixture(language, true, false);
-      await f.click(A.MENU_ORDER);
+      await f.nameStep();
       await f.text('Арман');
       Object.assign(f.current().customer, {
         conversationState: 'HUMAN_HANDOFF',
@@ -87,13 +110,13 @@ describe('language and safe routing', () => {
       expect(JSON.stringify(resumed.messages)).toContain(
         language === 'ru' ? 'номер телефона' : 'телефон нөмірін',
       );
-      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_CITY');
+      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_ADDRESS');
       expect(f.answer).not.toHaveBeenCalled();
     },
   );
   it('honors STOP before recovering a legacy disabled handoff on the next message', async () => {
     const f = fixture('ru', true, false);
-    await f.click(A.MENU_ORDER);
+    await f.nameStep();
     Object.assign(f.current().customer, {
       conversationState: 'HUMAN_HANDOFF',
       previousState: 'ORDER_NAME',
@@ -118,7 +141,7 @@ describe('language and safe routing', () => {
     'keeps an editable draft at its current step with manager disabled in %s',
     async (language) => {
       const f = fixture(language, true, false);
-      await f.click(A.MENU_ORDER);
+      await f.nameStep();
       await f.text('Арман');
       const before = structuredClone(f.current());
       const after = await f.click(A.MANAGER);
@@ -128,7 +151,7 @@ describe('language and safe routing', () => {
       expect(JSON.stringify(after.messages)).toContain(
         language === 'ru' ? 'не подключён' : 'қосылмаған',
       );
-      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_CITY');
+      expect((await f.text('+77011234567')).customer.conversationState).toBe('ORDER_ADDRESS');
       expect(f.answer).not.toHaveBeenCalled();
     },
   );
@@ -151,7 +174,7 @@ describe('language and safe routing', () => {
     expect(failed.customer.conversationState).toBe('MAIN_MENU');
     expect(failed.handoff).toBeUndefined();
     expect(JSON.stringify(failed.messages)).not.toContain('private transport');
-    expect((await f.click(A.MENU_ORDER)).customer.conversationState).toBe('ORDER_NAME');
+    expect((await f.click(A.MENU_ORDER)).customer.conversationState).toBe('ORDER_DISC');
   });
   it('does not cancel or unfreeze a pending checkout when manager is disabled', async () => {
     const f = fixture('ru', true, false);
@@ -235,6 +258,223 @@ describe('language and safe routing', () => {
 });
 
 describe('deterministic order wizard', () => {
+  it('uses the configured catalog price consistently through summary and payment confirmation', async () => {
+    const f = fixture('ru', true, true, 25000);
+    const product = await f.click(A.MENU_PRODUCT);
+    expect(JSON.stringify(product.messages)).toContain('25 000');
+    const ready = await f.complete();
+    expect(ready.order).toMatchObject({
+      unitPrice: 25000,
+      subtotalAmount: 50000,
+      totalAmount: 50000,
+    });
+    const confirmed = await f.click(A.ORDER_CONFIRM);
+    expect(confirmed.createPayment).toBe(true);
+    expect(confirmed.order?.totalAmount).toBe(50000);
+  });
+  it('starts with the catalog selection and asks explicitly for quantity before personal data', async () => {
+    const f = fixture();
+    await f.click(A.PRODUCT_DISCS);
+    const id = f.catalog.discs()[0]!.id;
+    await f.click(`${A.DISC_PREFIX}${id}`);
+    const started = await f.click(A.PRODUCT_BUY);
+    expect(started.customer.conversationState).toBe('ORDER_QUANTITY');
+    expect(started.order?.selectedDiscIds).toEqual([id]);
+    expect(started.order?.quantity).toBe(1);
+    expect(started.order?.recipientName).toBeNull();
+    expect((await f.text('2 комплекта')).customer.conversationState).toBe('ORDER_CITY');
+    expect((await f.text('Алматы')).customer.conversationState).toBe('ORDER_CONSENT');
+    expect((await f.click(A.NOTIFICATIONS_SKIP)).customer.conversationState).toBe('ORDER_NAME');
+    expect(f.current().customer.notificationConsent).not.toBe(true);
+    expect(f.answer).not.toHaveBeenCalled();
+  });
+  it.each(['2 комплекта', 'екі жиынтық'])(
+    'accepts an unambiguous natural quantity: %s',
+    async (quantity) => {
+      const f = fixture();
+      await f.selection();
+      const result = await f.text(quantity);
+      expect(result.order?.quantity).toBe(2);
+      expect(result.customer.conversationState).toBe('ORDER_CITY');
+      expect(f.answer).not.toHaveBeenCalled();
+    },
+  );
+  it('accepts a multiline address and includes every line in the final order', async () => {
+    const f = fixture();
+    await f.nameStep();
+    await f.text('Арман');
+    await f.text('+77011234567');
+    const address = 'ул. Абая 10\nдом 2, квартира 5';
+    const result = await f.text(address);
+    expect(result.customer.conversationState).toBe('ORDER_CONFIRMATION');
+    expect(result.order?.address).toBe('ул. Абая 10 дом 2, квартира 5');
+    expect(result.order?.totalAmount).toBe(40000);
+  });
+  it.each(['ru', 'kk'] as const)(
+    'asks for recipient data without character-count instructions (%s)',
+    async (language) => {
+      const f = fixture(language);
+      const name = await f.nameStep();
+      expect(JSON.stringify(name.messages)).not.toMatch(/символ|таңба/iu);
+      await f.text('Арман');
+      const address = await f.text('+77011234567');
+      expect(address.customer.conversationState).toBe('ORDER_ADDRESS');
+      expect(JSON.stringify(address.messages)).not.toMatch(/символ|таңба/iu);
+    },
+  );
+  it('does not send recipient-field history to AI when answering an interruption', async () => {
+    const f = fixture();
+    await f.complete();
+    const current = f.current();
+    const result = await f.service.handle({
+      customer: current.customer,
+      order: current.order,
+      message: {
+        id: 'private-history-question',
+        from: '77011234567',
+        type: 'text',
+        text: 'Как работает шкатулка?',
+      },
+      history: [
+        { role: 'user', content: 'Арман' },
+        { role: 'user', content: '+77011234567' },
+        { role: 'user', content: 'Абая 10, квартира 12' },
+      ],
+    });
+    expect(result.customer.conversationState).toBe('ORDER_CONFIRMATION');
+    const input = f.answer.mock.calls.at(-1)?.[0];
+    expect(input).toBeDefined();
+    expect(JSON.stringify(input)).not.toContain('Арман');
+    expect(JSON.stringify(input)).not.toContain('+77011234567');
+    expect(JSON.stringify(input)).not.toContain('Абая 10');
+  });
+  it('does not treat the recipient name as personal data when it is only a substring of an ordinary word', async () => {
+    const f = fixture();
+    await f.nameStep();
+    await f.text('Анна');
+    await f.text('+77011234567');
+    await f.text('Абая 10');
+    const before = structuredClone(f.current().order);
+    const question = 'Данная модель работает без батареек?';
+    const result = await f.text(question);
+    expect(f.answer).toHaveBeenCalledOnce();
+    expect(f.answer.mock.calls[0]?.[0].text).toBe(question);
+    expect(result.customer.conversationState).toBe('ORDER_CONFIRMATION');
+    expect(result.order).toEqual(before);
+    expect(result.createPayment).toBeUndefined();
+  });
+  it.each(['ru', 'kk'] as const)(
+    'answers questions at every shopping and recipient step without storing them as fields (%s)',
+    async (language) => {
+      const f = fixture(language);
+      f.answer.mockResolvedValue({
+        text: language === 'ru' ? 'Можно выбрать подарок.' : 'Сыйлық таңдауға болады.',
+      });
+      const question =
+        language === 'ru' ? 'А как работает шкатулка?' : 'Қобдиша қалай жұмыс істейді?';
+      const check = async () => {
+        const before = structuredClone(f.current());
+        const result = await f.text(question);
+        expect(result.customer.conversationState).toBe(before.customer.conversationState);
+        expect(result.order).toEqual(before.order);
+        expect(result.createPayment).toBeUndefined();
+        expect(JSON.stringify(result.messages)).toContain(
+          language === 'ru' ? 'Можно выбрать подарок.' : 'Сыйлық таңдауға болады.',
+        );
+      };
+      await f.click(A.MENU_ORDER);
+      await check();
+      await f.click(`${A.DISC_PREFIX}${f.catalog.discs()[0]!.id}`);
+      await f.click(A.DISC_DONE);
+      await check();
+      await f.text('2');
+      await check();
+      await f.text('Алматы');
+      await check();
+      await f.click(A.NOTIFICATIONS_SKIP);
+      await check();
+      await f.text('Арман');
+      await check();
+      await f.text('+77011234567');
+      await check();
+      await f.text('Абая 10');
+      await check();
+      expect(f.answer).toHaveBeenCalledTimes(8);
+      expect(JSON.stringify(f.answer.mock.calls)).not.toContain('+77011234567');
+      expect(JSON.stringify(f.answer.mock.calls)).not.toContain('Абая 10');
+    },
+  );
+  it.each(['да, всё верно', 'бәрі дұрыс'])(
+    'confirms the current complete order with natural text and creates no duplicate payment: %s',
+    async (confirmation) => {
+      const f = fixture();
+      await f.complete();
+      expect((await f.text(confirmation)).createPayment).toBe(true);
+      expect(f.current().order?.paymentStatus).toBe('CREATING');
+      expect((await f.text(confirmation)).createPayment).toBeUndefined();
+      expect(f.current().order?.paymentStatus).toBe('CREATING');
+    },
+  );
+  it('does not interpret a conditional yes as approval to create a payment', async () => {
+    const f = fixture();
+    await f.complete();
+    const result = await f.text('Да, но можно изменить адрес?');
+    expect(result.createPayment).toBeUndefined();
+    expect(result.order?.paymentStatus).toBe('NOT_CREATED');
+    expect(result.customer.conversationState).toBe('ORDER_CONFIRMATION');
+  });
+  it('answers a general payment question while preserving the frozen checkout', async () => {
+    const f = fixture();
+    await f.complete();
+    const pending = structuredClone(await f.click(A.ORDER_CONFIRM));
+    f.answer.mockResolvedValue({ text: 'Оплатить можно на защищённой странице.' });
+    const result = await f.text('Как оплатить заказ?');
+    expect(result.customer.conversationState).toBe('PAYMENT_PENDING');
+    expect(result.order).toEqual(pending.order);
+    expect(result.createPayment).toBeUndefined();
+    expect(JSON.stringify(result.messages)).toContain('защищённой странице');
+  });
+  it.each([
+    ['ru', 'Статус оплаты'],
+    ['kk', 'Төлем мәртебесі'],
+  ] as const)(
+    'returns the existing payment status without asking AI (%s)',
+    async (language, question) => {
+      const f = fixture(language);
+      await f.complete();
+      const before = structuredClone(await f.click(A.ORDER_CONFIRM));
+      const result = await f.text(question);
+      expect(result.customer.conversationState).toBe('PAYMENT_PENDING');
+      expect(result.order).toEqual(before.order);
+      expect(result.createPayment).toBeUndefined();
+      expect(f.answer).not.toHaveBeenCalled();
+      expect(JSON.stringify(result.messages)).toContain(
+        language === 'ru' ? 'Оплата пока не подтверждена' : 'Төлем жүйесі төлемді әлі растаған жоқ',
+      );
+    },
+  );
+  it('routes a broken payment link to a manager without changing the payment', async () => {
+    const f = fixture();
+    await f.complete();
+    const pending = structuredClone(await f.click(A.ORDER_CONFIRM));
+    const result = await f.text('Ссылка не открывается');
+    expect(result.customer.conversationState).toBe('HUMAN_HANDOFF');
+    expect(result.handoff).toBeDefined();
+    expect(result.order).toEqual(pending.order);
+    expect(result.createPayment).toBeUndefined();
+  });
+  it('keeps a question reversible when the answer needs an unavailable manager', async () => {
+    const f = fixture('ru', true, false);
+    await f.nameStep();
+    const before = structuredClone(f.current());
+    f.answer.mockResolvedValue({ action: 'request_human_handoff', reason: 'UNKNOWN_INFORMATION' });
+    const result = await f.text('А гарантия сколько действует?');
+    expect(result.order).toEqual(before.order);
+    expect(result.customer.conversationState).toBe('ORDER_NAME');
+    expect(result.handoff).toBeUndefined();
+    expect(JSON.stringify(result.messages)).toContain('не подключён');
+    expect((await f.text('Арман')).customer.conversationState).toBe('ORDER_PHONE');
+  });
   it.each(['ru', 'kk'] as const)(
     'collects all fields and computes the amount before explicit confirmation (%s)',
     async (language) => {
@@ -266,25 +506,24 @@ describe('deterministic order wizard', () => {
   );
   it('rejects unsupported media, malformed phone and unbounded quantities without advancing', async () => {
     const f = fixture();
-    await f.click(A.MENU_ORDER);
+    await f.selection();
+    for (const input of ['0', '-1', '1.5', '11', '1e1', '20000']) {
+      expect((await f.text(input)).customer.conversationState).toBe('ORDER_QUANTITY');
+    }
+    expect((await f.click(A.ORDER_QUANTITY_ONE)).order?.totalAmount).toBe(20000);
+    await f.text('Алматы');
+    await f.click(A.NOTIFICATIONS_SKIP);
     const media = await f.send({ type: 'unsupported', text: 'image.jpg' });
     expect(media.customer.conversationState).toBe('ORDER_NAME');
     expect(media.order?.recipientName).toBeNull();
     await f.text('Арман');
     expect((await f.text('12345')).customer.conversationState).toBe('ORDER_PHONE');
     await f.text('+77011234567');
-    await f.text('Алматы');
-    await f.text('Абая 10');
-    await f.click(`${A.DISC_PREFIX}${f.catalog.discs()[0]!.id}`);
-    await f.click(A.DISC_DONE);
-    for (const input of ['0', '-1', '1.5', '11', '1e1', '20000']) {
-      expect((await f.text(input)).customer.conversationState).toBe('ORDER_QUANTITY');
-    }
-    expect((await f.click(A.ORDER_QUANTITY_ONE)).order?.totalAmount).toBe(20000);
+    expect((await f.text('Абая 10')).customer.conversationState).toBe('ORDER_CONFIRMATION');
   });
   it('does not consume a payment-credentials redaction marker as an order field', async () => {
     const f = fixture();
-    await f.click(A.MENU_ORDER);
+    await f.nameStep();
     const result = await f.text('[PAYMENT_CREDENTIALS_REDACTED]');
     expect(result.customer.conversationState).toBe('ORDER_NAME');
     expect(result.order?.recipientName).toBeNull();
@@ -292,7 +531,7 @@ describe('deterministic order wizard', () => {
   });
   it('keeps draft fields across menu and language changes', async () => {
     const f = fixture();
-    await f.click(A.MENU_ORDER);
+    await f.nameStep();
     const initial = await f.text('Арман');
     await f.click(A.MENU_BACK);
     await f.click(A.LANG_KK);
@@ -316,9 +555,28 @@ describe('deterministic order wizard', () => {
     expect(updated.order?.recipientName).toBe('Арман');
     expect((await f.click(A.ORDER_CONFIRM)).createPayment).toBe(true);
   });
+  it('resumes the selected edit after answering a question without advancing the order', async () => {
+    const f = fixture();
+    await f.complete();
+    await f.click(A.ORDER_EDIT);
+    await f.click(A.EDIT_NAME);
+    const before = structuredClone(f.current().order);
+    const answer = await f.text('Сколько стоит доставка?');
+    expect(answer.customer.conversationState).toBe('ORDER_NAME');
+    expect(answer.customer.editingField).toBe(A.EDIT_NAME);
+    expect(answer.order).toEqual(before);
+    expect(answer.createPayment).toBeUndefined();
+    const changed = await f.text('Алия');
+    expect(changed.customer.conversationState).toBe('ORDER_CONFIRMATION');
+    expect(changed.customer.editingField).toBeNull();
+    expect(changed.order?.recipientName).toBe('Алия');
+    expect(changed.order?.quantity).toBe(before?.quantity);
+    expect(changed.order?.totalAmount).toBe(before?.totalAmount);
+  });
   it('ignores stale buttons without bypassing required fields', async () => {
     const f = fixture();
-    await f.click(A.MENU_ORDER);
+    await f.nameStep();
+    const before = structuredClone(f.current().order);
     for (const action of [
       A.ORDER_CONFIRM,
       A.ORDER_EDIT,
@@ -329,7 +587,7 @@ describe('deterministic order wizard', () => {
       const result = await f.click(action);
       expect(result.customer.conversationState).toBe('ORDER_NAME');
       expect(result.order?.recipientName).toBeNull();
-      expect(result.order?.discId).toBeNull();
+      expect(result.order).toEqual(before);
       expect(result.createPayment).toBeUndefined();
     }
   });
@@ -393,6 +651,46 @@ describe('deterministic order wizard', () => {
     });
     expect(repeated.createPayment).toBeUndefined();
     expect(failed.paymentStatus).toBe('FAILED');
+  });
+  it('sends a frozen failed payment for review after a price change without rewriting the agreed order', async () => {
+    const f = fixture();
+    await f.complete();
+    const pending = await f.click(A.ORDER_CONFIRM);
+    const failed: OrderData = {
+      ...structuredClone(pending.order!),
+      paymentStatus: 'FAILED',
+      orderStatus: 'AWAITING_CONFIRMATION',
+      paymentUrl: 'https://example.test/failed-payment',
+    };
+    const before = structuredClone(failed);
+    const updatedService = new ConversationService({
+      catalog: new CatalogService({ productPrice: 25000 }),
+      ai: { answer: f.answer },
+      productPrice: 25000,
+      maxQuantity: 10,
+      processFirstMessageAfterLanguage: true,
+      managerHandoffEnabled: true,
+    });
+    const result = await updatedService.handle({
+      customer: { ...pending.customer, conversationState: 'ORDER_CONFIRMATION' },
+      order: failed,
+      message: {
+        id: 'retry-after-price-change',
+        from: '77011234567',
+        type: 'interactive',
+        actionId: A.PAYMENT_RETRY,
+      },
+    });
+    expect(result.customer.conversationState).toBe('HUMAN_HANDOFF');
+    expect(result.handoff?.reason).toBe('CHECKOUT_REQUIRES_REVIEW');
+    expect(result.createPayment).toBeUndefined();
+    expect(result.order).toEqual(before);
+    expect(result.order?.unitPrice).toBe(20000);
+    expect(result.order?.totalAmount).toBe(40000);
+    expect(result.order?.packageSnapshot).toEqual(before.packageSnapshot);
+    expect(result.order?.deliverySnapshot).toEqual(before.deliverySnapshot);
+    expect(failed).toEqual(before);
+    expect(f.answer).not.toHaveBeenCalled();
   });
   it('does not revive a cancelled order through an old confirmation button', async () => {
     const f = fixture();

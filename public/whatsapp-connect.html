@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Подключение WhatsApp</title>
+  </head>
+  <body>
+    <main>
+      <h1>Подключение WhatsApp</h1>
+      <p>Введите ключ администратора. Он используется только в этой вкладке и не сохраняется.</p>
+      <form id="login">
+        <label
+          >Ключ администратора <input id="token" type="password" autocomplete="off" required
+        /></label>
+        <button>Открыть управление</button>
+      </form>
+      <p id="status" role="status">Ожидание входа</p>
+      <img id="qr" alt="QR-код подключения WhatsApp" hidden width="320" height="320" />
+      <p>
+        На телефоне: WhatsApp Business → Связанные устройства → Привязать устройство. Отсканируйте
+        QR-код.
+      </p>
+      <p>
+        После подключения телефон остаётся доступен для ручных ответов. Чтобы бот не ответил
+        одновременно с вами, поставьте разговор на паузу перед ответом. Ручной ответ также включает
+        паузу после получения его системой.
+      </p>
+      <button id="reconnect" hidden>Восстановить подключение</button>
+      <h2>Диалоги</h2>
+      <p>
+        Здесь отображаются последние 100 диалогов. После ручного ответа бот остаётся на паузе до
+        явного возврата.
+      </p>
+      <ul id="conversations"></ul>
+    </main>
+    <script src="/whatsapp/connect.js" defer></script>
+  </body>
+</html>

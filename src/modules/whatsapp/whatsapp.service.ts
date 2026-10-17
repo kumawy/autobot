@@ -15,6 +15,7 @@ import { errorCode } from '../../utils/security.js';
 import type { HandoffService } from '../notifications/handoff.service.js';
 import type { WhatsAppStatus } from './whatsapp.parser.js';
 import { LEASE_MS } from '../../jobs/leases.js';
+import { safeConsultationText } from '../ai/consultation-history.js';
 const customerFields = [
   'preferredLanguage',
   'conversationState',
@@ -43,6 +44,7 @@ const orderFields = [
   'productId',
   'discId',
   'quantity',
+  'quantityConfirmed',
   'unitPrice',
   'totalAmount',
   'currency',
@@ -96,6 +98,38 @@ export class WhatsAppService {
         })),
       ],
       skipDuplicates: true,
+    });
+  }
+  /** Outgoing messages from a linked phone are human replies, never customer input. */
+  async receiveManualReply(message: InboundMessage): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      await lock(tx, `customer-phone:${message.from}`);
+      // The gateway reserves the bot's external ID before send, closing the echo/ACK race.
+      if (await tx.message.findUnique({ where: { whatsappMessageId: message.id } })) return;
+      const customer = await tx.customer.upsert({
+        where: { whatsappId: message.from },
+        create: { whatsappId: message.from, lastInboundAt: new Date(0) },
+        update: {},
+      });
+      await lock(tx, `customer:${customer.id}`);
+      await tx.message.create({
+        data: {
+          customerId: customer.id,
+          whatsappMessageId: message.id,
+          direction: 'outbound',
+          type: message.type,
+          content: message.text ?? null,
+          payload: { origin: 'phone', mediaType: message.mediaType ?? null },
+          deliveryStatus: 'SENT',
+          sentAt: message.timestamp ? new Date(message.timestamp * 1000) : new Date(),
+        },
+      });
+      await this.options.handoff?.open(tx, {
+        customerId: customer.id,
+        orderId: customer.currentOrderId ?? undefined,
+        reason: 'MANUAL_WHATSAPP_REPLY',
+        previousState: customer.conversationState,
+      });
     });
   }
   private async claim() {
@@ -237,10 +271,17 @@ export class WhatsAppService {
           history: history
             .reverse()
             .filter((m) => m.type === 'text' && m.content)
-            .map((m) => ({
-              role: m.direction === 'inbound' ? 'user' : 'assistant',
-              content: m.content!,
-            })),
+            .flatMap((m) => {
+              const content = safeConsultationText(m.content);
+              return content
+                ? [
+                    {
+                      role: m.direction === 'inbound' ? ('user' as const) : ('assistant' as const),
+                      content,
+                    },
+                  ]
+                : [];
+            }),
         });
       await this.db.$transaction(async (tx) => {
         await lock(tx, `customer:${customer.id}`);
@@ -277,6 +318,10 @@ export class WhatsAppService {
             where: { token: (event.payload as { actionId: string }).actionId, consumedAt: null },
             data: { consumedAt: new Date() },
           });
+        const replayedQuestion =
+          result.consultation === true && !customer.preferredLanguage
+            ? customer.firstUnhandledMessage
+            : null;
         await tx.message.upsert({
           where: { whatsappMessageId: message.id },
           create: {
@@ -285,10 +330,38 @@ export class WhatsAppService {
             direction: 'inbound',
             type: message.type,
             content: message.text ?? message.actionId ?? null,
-            payload: { consultation: customer.conversationState === 'AI_QA' },
+            payload: {
+              consultation:
+                result.consultation === true &&
+                !replayedQuestion &&
+                message.type === 'text' &&
+                safeConsultationText(message.text ?? null) !== null,
+            },
           },
           update: {},
         });
+        if (replayedQuestion && safeConsultationText(replayedQuestion)) {
+          const original = await tx.message.findFirst({
+            where: {
+              customerId: customer.id,
+              direction: 'inbound',
+              type: 'text',
+              content: replayedQuestion,
+              whatsappMessageId: { not: message.id },
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (original)
+            await tx.message.update({
+              where: { id: original.id },
+              data: {
+                payload: json({
+                  ...(original.payload as Record<string, unknown>),
+                  consultation: true,
+                }),
+              },
+            });
+        }
         if (result.order) {
           const fields = pick(result.order, orderFields);
           const snapshot = result.order.packageSnapshot;
@@ -396,7 +469,10 @@ export class WhatsAppService {
             orderId: result.order?.id,
             payload: {
               ...encoded,
-              consultation: result.customer.conversationState === 'AI_QA',
+              consultation:
+                result.consultationMessageIndexes?.includes(index) === true &&
+                output.type === 'text' &&
+                safeConsultationText(output.text) !== null,
               origin: 'bot',
               handoffNotice: finalCustomer.conversationState === 'HUMAN_HANDOFF',
               conversationVersion: finalCustomer.conversationVersion,

@@ -57,12 +57,13 @@ export function executeAiTool(
   )
     throw new Error('AI_CONTEXT_FORBIDDEN');
   if (
-    ['start_order', 'show_main_menu', 'request_human_handoff'].includes(name) &&
+    ['start_order', 'show_main_menu'].includes(name) &&
     (!context || !['MAIN_MENU', 'AI_QA', 'PRODUCT_VIEW', 'DISC_LIST'].includes(context.state))
   )
     throw new Error('AI_CONTROL_STATE_FORBIDDEN');
   const args: unknown = JSON.parse(argumentsJson);
   if (name === 'request_human_handoff') {
+    if (!context) throw new Error('AI_CONTROL_STATE_FORBIDDEN');
     const result = z
       .object({ reason: z.enum(handoffReasons) })
       .strict()

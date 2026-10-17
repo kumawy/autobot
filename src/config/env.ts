@@ -26,6 +26,14 @@ const schema = z.object({
   PAYMENT_PROVIDER: z.enum(['mock', 'freedompay']).default('mock'),
   ADMIN_TOKEN: z.string().min(24),
   MOCK_PAYMENT_SECRET: z.string().min(24),
+  WHATSAPP_TRANSPORT: z.enum(['cloud', 'baileys']).default('cloud'),
+  WHATSAPP_BAILEYS_BUTTONS: flag(false),
+  WHATSAPP_SESSION_ID: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]{1,64}$/)
+    .default('primary'),
+  WHATSAPP_AUTH_ENCRYPTION_KEY: optional,
+  WHATSAPP_EXPECTED_NUMBER: optional,
   WHATSAPP_ACCESS_TOKEN: optional,
   WHATSAPP_PHONE_NUMBER_ID: optional,
   WHATSAPP_WABA_ID: optional,
@@ -98,17 +106,24 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
   validateDatabaseUrl(env.DATABASE_URL);
   if (env.DIRECT_URL) validateDatabaseUrl(env.DIRECT_URL, 'migration');
   if (env.INTEGRATION_MODE !== 'demo') {
-    for (const key of [
-      'WHATSAPP_ACCESS_TOKEN',
-      'WHATSAPP_PHONE_NUMBER_ID',
-      'WHATSAPP_WABA_ID',
-      'WHATSAPP_VERIFY_TOKEN',
-      'WHATSAPP_APP_SECRET',
-      'WHATSAPP_GRAPH_API_VERSION',
-    ] as const)
-      if (!env[key].trim()) throw new Error(`Missing ${key} for live integrations`);
-    if (!/^v\d+\.\d+$/.test(env.WHATSAPP_GRAPH_API_VERSION))
-      throw new Error('Invalid WHATSAPP_GRAPH_API_VERSION');
+    if (env.WHATSAPP_TRANSPORT === 'cloud') {
+      for (const key of [
+        'WHATSAPP_ACCESS_TOKEN',
+        'WHATSAPP_PHONE_NUMBER_ID',
+        'WHATSAPP_WABA_ID',
+        'WHATSAPP_VERIFY_TOKEN',
+        'WHATSAPP_APP_SECRET',
+        'WHATSAPP_GRAPH_API_VERSION',
+      ] as const)
+        if (!env[key].trim()) throw new Error(`Missing ${key} for live integrations`);
+      if (!/^v\d+\.\d+$/.test(env.WHATSAPP_GRAPH_API_VERSION))
+        throw new Error('Invalid WHATSAPP_GRAPH_API_VERSION');
+    } else {
+      if (!/^[a-fA-F0-9]{64}$/.test(env.WHATSAPP_AUTH_ENCRYPTION_KEY))
+        throw new Error('Baileys requires a 32-byte WHATSAPP_AUTH_ENCRYPTION_KEY in hex');
+      if (env.WHATSAPP_EXPECTED_NUMBER && !/^\d{7,15}$/.test(env.WHATSAPP_EXPECTED_NUMBER))
+        throw new Error('WHATSAPP_EXPECTED_NUMBER must contain 7–15 digits without +');
+    }
     if (env.TELEGRAM_ENABLED)
       for (const key of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_MANAGER_CHAT_ID'] as const)
         if (!env[key].trim()) throw new Error(`Missing ${key} for enabled Telegram`);
@@ -144,17 +159,25 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
     throw new Error('Staging requires mock payments');
   if (env.INTEGRATION_MODE === 'staging') {
     const base = new URL(env.APP_BASE_URL);
+    const loopbackOrigin = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
+    const localBaileys =
+      env.WHATSAPP_TRANSPORT === 'baileys' &&
+      env.NODE_ENV !== 'production' &&
+      base.protocol === 'http:' &&
+      loopbackOrigin &&
+      ['localhost', '127.0.0.1', '::1'].includes(env.HOST);
     if (
       !input.APP_BASE_URL ||
-      base.protocol !== 'https:' ||
+      (!localBaileys && (base.protocol !== 'https:' || loopbackOrigin)) ||
       base.username ||
       base.password ||
       base.search ||
       base.hash ||
-      base.pathname !== '/' ||
-      ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)
+      base.pathname !== '/'
     )
-      throw new Error('Staging requires an explicit public HTTPS APP_BASE_URL origin');
+      throw new Error(
+        'Staging requires an explicit public HTTPS APP_BASE_URL origin (local Baileys allows HTTP loopback with a loopback HOST)',
+      );
   }
   if (env.INTEGRATION_MODE !== 'demo' && env.DEV_ROUTES_ENABLED)
     throw new Error('Development simulator requires demo integration mode');
@@ -178,8 +201,13 @@ export function readEnv(input: NodeJS.ProcessEnv = process.env): Env {
     env.DEV_ROUTES_ENABLED = false;
     if (!env.APP_BASE_URL.startsWith('https://') || !env.FREEDOMPAY_BASE_URL.startsWith('https://'))
       throw new Error('Production requires HTTPS');
-    if (env.ADMIN_TOKEN.startsWith('local-') || env.WHATSAPP_VERIFY_TOKEN.length < 24)
+    if (
+      env.ADMIN_TOKEN.startsWith('local-') ||
+      (env.WHATSAPP_TRANSPORT === 'cloud' && env.WHATSAPP_VERIFY_TOKEN.length < 24)
+    )
       throw new Error('Use strong production secrets');
   }
+  if (env.WHATSAPP_TRANSPORT === 'baileys' && env.INTEGRATION_MODE === 'demo')
+    throw new Error('Baileys requires staging or live integration mode');
   return env;
 }

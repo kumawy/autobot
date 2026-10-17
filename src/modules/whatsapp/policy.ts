@@ -59,6 +59,7 @@ export function decideWhatsAppSend(input: {
   now?: Date;
   isAiReply?: boolean;
   operatorTicketOpen?: boolean;
+  transport?: 'cloud' | 'baileys';
 }): SendDecision {
   const { customer, message, registry } = input;
   if (input.isAiReply && customer.conversationState === 'HUMAN_HANDOFF')
@@ -70,6 +71,14 @@ export function decideWhatsAppSend(input: {
   if (purpose === 'operator_reply' && input.operatorTicketOpen === false)
     return { allowed: false, code: 'STALE_OPERATOR' };
   const initiated = !['reply', 'operator_reply'].includes(purpose) || message.type === 'template';
+  // Web-linked accounts have no Cloud API template mechanism. Keep consent/handoff guards.
+  if (input.transport === 'baileys') {
+    if (message.type === 'template')
+      return { allowed: false, code: 'BAILEYS_TEMPLATES_UNSUPPORTED' };
+    if (initiated && (!customer.notificationConsent || customer.optedOutAt))
+      return { allowed: false, code: 'BLOCKED_CONSENT' };
+    return { allowed: true, message };
+  }
   const age = (input.now ?? new Date()).getTime() - customer.lastInboundAt.getTime();
   const withinWindow =
     Number.isFinite(age) &&
