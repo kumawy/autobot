@@ -97,10 +97,10 @@ curl --fail http://127.0.0.1:3001/health
 Dockerfile запускает процесс от пользователя `node`, слушает `HOST`/`PORT`, включает Prisma CLI и проверяет `/health`. Он не содержит `.env` или секретов. Для staging переопределите `NODE_ENV` из production-default образа. Пример для сервера с локальным HTTPS reverse proxy:
 
 ```sh
-docker build -t sandargift:staging .
-docker run --rm --env-file .env.staging.local -e NODE_ENV=development sandargift:staging node node_modules/prisma/build/index.js migrate deploy
-docker run -d --name sandargift-http --init --restart unless-stopped --env-file .env.staging.local -e NODE_ENV=development -e HOST=0.0.0.0 -e PORT=3000 -p 127.0.0.1:3001:3000 sandargift:staging
-docker run -d --name sandargift-worker --init --restart unless-stopped --env-file .env.staging.local -e NODE_ENV=development --health-cmd='node dist/src/jobs/health.js' --health-timeout=10s sandargift:staging node dist/src/worker.js
+docker build -t autobot:staging .
+docker run --rm --env-file .env.staging.local -e NODE_ENV=development autobot:staging node node_modules/prisma/build/index.js migrate deploy
+docker run -d --name autobot-http --init --restart unless-stopped --env-file .env.staging.local -e NODE_ENV=development -e HOST=0.0.0.0 -e PORT=3000 -p 127.0.0.1:3001:3000 autobot:staging
+docker run -d --name autobot-worker --init --restart unless-stopped --env-file .env.staging.local -e NODE_ENV=development --health-cmd='node dist/src/jobs/health.js' --health-timeout=10s autobot:staging node dist/src/worker.js
 ```
 
 Миграции — отдельный шаг release до запуска новых процессов, а не параллельная команда каждого worker. Исходный `docker-compose.yml` остаётся автономным локальным demo с собственной PostgreSQL. В среде без Docker выполните установку, сборку и миграции теми же npm-командами; настройте менеджер процессов на `npm start` и `npm run worker`, передайте секреты через окружение и выставьте `HOST=0.0.0.0` за HTTPS proxy. Docker build/runtime в этой рабочей среде не проверены, поскольку Docker не установлен; загрузка Prisma config в структуре runtime-образа проверена отдельно.

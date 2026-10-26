@@ -23,7 +23,7 @@ if (!existsSync(envFile)) {
       GOOGLE_SHEETS_ENABLED: 'false',
       TELEGRAM_ENABLED: 'false',
       MANAGER_HANDOFF_ENABLED: 'false',
-      BUSINESS_NAME: 'Sandargift',
+      BUSINESS_NAME: 'Autobot',
     };
     for (const [key, value] of Object.entries(overrides)) {
       const pattern = new RegExp(`^${key}=.*$`, 'm');
